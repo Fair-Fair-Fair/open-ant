@@ -81,6 +81,30 @@ class CliEventSource(EventSource):
 
 
 @dataclass
+class WebSocketEventSource(EventSource):
+    """Event from websocket client"""
+
+    _namespace = "platform-webSocket"
+    user_id: str
+
+    @classmethod
+    def from_string(cls, s: str) -> "WebSocketEventSource":
+        """Parse source string into WebSocketEventSource"""
+        parts = s.split(":", 1)
+        if len(parts) != 2 or parts[0] != cls._namespace or not parts[1]:
+            raise ValueError(f"Invalid WebSocketEventSource: {s}")
+        return cls(user_id=parts[1])
+
+    def __str__(self) -> str:
+        return f"{self._namespace}:{self.user_id}"
+
+    @property
+    def is_platform(self) -> bool:
+        """WebSocket sources are platform sources"""
+        return True
+
+
+@dataclass
 class Event:
     """Base class for all typed events."""
 

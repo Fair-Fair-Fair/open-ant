@@ -8,6 +8,10 @@ from typing import Any
 
 from ant.channel.base import Channel
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ant.server.websocket_worker import WebSocketWorker
+
 
 class SharedContext:
     """Global shared state for the application"""
@@ -19,6 +23,7 @@ class SharedContext:
     history_store: HistoryStore
     eventbus: EventBus
     channels: list[Channel[Any]]
+    websocket_worker: 'WebSocketWorker | None'
 
     def __init__(self, config: Config,
                  channels: list[Channel[Any]] | None = None) -> None:
@@ -33,3 +38,5 @@ class SharedContext:
             self.channels = channels
         else:
             self.channels = Channel.from_config(config)
+
+        self.websocket_worker = None

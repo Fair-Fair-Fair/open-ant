@@ -81,6 +81,13 @@ class ChannelConfig(BaseModel):
     discord: DiscordConfig | None = None
 
 
+class ApiConfig(BaseModel):
+    """HTTP API configuration"""
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8000, gt=0, lt=65536)
+
+
 class Config(BaseModel):
     """Main configuration for step 00."""
 
@@ -97,6 +104,8 @@ class Config(BaseModel):
     channels: ChannelConfig = Field(default_factory=ChannelConfig)
     sources: dict[str, SourceSessionConfig] = Field(default_factory=dict)
     default_delivery_source: str | None = None
+
+    api: ApiConfig = Field(default_factory=ApiConfig)
 
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":
