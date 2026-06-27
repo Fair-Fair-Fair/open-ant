@@ -96,6 +96,10 @@ class Config(BaseModel):
     default_agent: str
     agents_path: Path = Field(default=Path("agents"))
     skills_path: Path = Field(default=Path("skills"))
+
+    # 12-cron-heartbeat
+    crons_path: Path = Field(default=Path("crons"))
+
     logging_path: Path = Field(default=Path(".logs"))
     history_path: Path = Field(default=Path(".history"))
     event_path: Path = Field(default=Path(".events"))
@@ -118,7 +122,8 @@ class Config(BaseModel):
             "skills_path",
             "history_path",
             "logging_path",
-            "event_path"
+            "event_path",
+            "crons_path",
         ):
             path = getattr(self, field_name)
             if not path.is_absolute():

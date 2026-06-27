@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 from ant.core.routing import RoutingTable
 
+# 12-cron-heartbeat
+from ant.core.cron_loader import CronLoader
+
 
 class SharedContext:
     """Global shared state for the application"""
@@ -26,6 +29,9 @@ class SharedContext:
     eventbus: EventBus
     channels: list[Channel[Any]]
     websocket_worker: 'WebSocketWorker | None'
+
+    # 12 cron-heartbeat
+    cron_loader: CronLoader
 
     # 11 multi-agent-routing
     routing_table: RoutingTable
@@ -47,3 +53,5 @@ class SharedContext:
         self.websocket_worker = None
 
         self.routing_table = RoutingTable(self)
+
+        self.cron_loader = CronLoader.from_config(config)

@@ -51,7 +51,7 @@ class EventSource(ABC):
 @dataclass
 class AgentEventSource(EventSource):
     """Source for agent-generated events"""
-    _namespace: ClassVar[str] = "agent"
+    _namespace = "agent"
     agent_id: str
 
     def __str__(self) -> str:
@@ -66,7 +66,7 @@ class AgentEventSource(EventSource):
 @dataclass
 class CliEventSource(EventSource):
     """Source for CLI-generated events"""
-    _namespace: ClassVar[str] = "platform-cli"
+    _namespace = "platform-cli"
 
     def __str__(self) -> str:
         return "platform-cli:cli-user"
@@ -102,6 +102,23 @@ class WebSocketEventSource(EventSource):
     def is_platform(self) -> bool:
         """WebSocket sources are platform sources"""
         return True
+
+
+# 12-cron-heartbeat
+@dataclass
+class CronEventSource(EventSource):
+    """Source for cron-generated events"""
+
+    _namespace = "cron"
+    cron_id: str
+
+    def __str__(self) -> str:
+        return f"cron:{self.cron_id}"
+
+    @classmethod
+    def from_string(cls, s: str) -> "CronEventSource":
+        _, cron_id = s.split(":", maxsplit=1)
+        return cls(cron_id=cron_id)
 
 
 @dataclass
@@ -153,10 +170,25 @@ class OutboundEvent(Event):
     error: str | None = None
 
 
+@dataclass
+class DispatchEvent(Event):
+    """Event for internal agent-to-agent delegation."""
+    parent_session_id: str = ""
+    retry_count: int = 0
+
+
+@dataclass
+class DispatchResultEvent(Event):
+    """Event for internal agent-to-agent delegation result."""
+    error: str | None = None
+
+
 # Registry mapping event class names to event classes
 _EVENT_CLASSES: dict[str, type[Event]] = {
     "InboundEvent": InboundEvent,
     "OutboundEvent": OutboundEvent,
+    "DispatchEvent": DispatchEvent,
+    "DispatchResultEvent": DispatchResultEvent,
 }
 
 

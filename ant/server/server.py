@@ -13,6 +13,8 @@ from .channel_worker import ChannelWorker
 from .websocket_worker import WebSocketWorker
 from .app import create_app
 from ant.utils.config import ConfigReloader
+# 12 cron heartbeat
+from .cron_worker import CronWorker
 
 if TYPE_CHECKING:
     from ant.core.context import SharedContext
@@ -56,7 +58,8 @@ class Server:
         self.workers = [
             self.context.eventbus,  # EventBus (active worker)
             AgentWorker(self.context),  # SubscriberWorker
-            DeliveryWorker(self.context),  # SubscriberWorker
+            DeliveryWorker(self.context),  # SubscriberWorker，
+            CronWorker(self.context),  # Background worker for scheduled tasks
             ws_worker,  # WebSocketWorker (SubscriberWorker)
         ]
 
