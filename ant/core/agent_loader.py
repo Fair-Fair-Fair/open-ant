@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, Field
 
 from ant.utils.config import Config, LLMConfig
 from ant.utils.def_loader import (
@@ -23,6 +23,7 @@ class AgentDef(BaseModel):
     soul_md: str = "" # personality layer (optional)
     llm: LLMConfig
     allow_skills: bool = False
+    max_concurrency: int = Field(default=1, ge=1)
 
 
 class AgentLoader:

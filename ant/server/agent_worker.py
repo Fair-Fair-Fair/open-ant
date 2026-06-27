@@ -10,7 +10,7 @@ Agent 工作模块 —— 负责接收入站事件并将其分发给对应的 Ag
 import asyncio
 import logging
 from dataclasses import replace  # 用于不可变 dataclass 的字段替换（如重试时递增 retry_count）
-from typing import Union
+from typing import Union, TYPE_CHECKING
 
 from .worker import SubscribeWorker  # 基类：提供事件订阅型 Worker 的基础能力
 from ant.core.agent import Agent  # Agent 核心类，封装 LLM 对话逻辑
@@ -21,6 +21,9 @@ from ant.core.events import (
 
 from ant.utils.def_loader import DefNotFoundError  # Agent/Skill 定义加载失败的异常
 
+if TYPE_CHECKING:
+    from ant.core.context import SharedContext
+    from ant.core.agent import AgentDef
 
 # 会话失败后的最大重试次数；超过此次数将直接返回错误给用户
 MAX_RETRIES = 3
@@ -36,12 +39,14 @@ class AgentWorker(SubscribeWorker):
     继承自 SubscribeWorker，具备 Worker 的生命周期管理能力。
     """
 
-    def __init__(self, context) -> None:
+    def __init__(self, context: "SharedContext") -> None:
         """初始化 AgentWorker
         Args:
             context: 全局上下文对象，包含 eventbus、history_store、agent_loader、command_registry 等共享组件
         """
         super().__init__(context)
+
+        self._semaphores: dict[str, asyncio.Semaphore] = {}
 
         # 在事件总线中订阅 InboundEvent 类型的事件，回调函数为 dispatch_event
         # 每当有用户消息等入站事件时，都会触发 dispatch_event
@@ -77,13 +82,18 @@ class AgentWorker(SubscribeWorker):
         except DefNotFoundError as e:
             # Agent 定义不存在时，向用户返回错误信息并终止处理
             logger.error(f"Agent not found: {agent_id}: {e}")
-            return await self._emit_response(event, "", agent_def.id, str(e))
+            return await self._emit_response(
+                event,
+                "",
+                agent_def.id,
+                str(e)
+            )
 
         # 以异步任务方式启动会话执行
         # 使用 create_task 而非 await，使事件分发不被阻塞，可以立即处理下一个事件
         asyncio.create_task(self.exec_session(event, agent_def))
 
-    async def exec_session(self, event: ProcessableEvent, agent_def) -> None:
+    async def exec_session(self, event: ProcessableEvent, agent_def: "AgentDef") -> None:
         """执行一次完整的 Agent 会话
         核心执行逻辑：
           1. 创建 Agent 实例并恢复/新建会话
@@ -96,61 +106,65 @@ class AgentWorker(SubscribeWorker):
             event: 入站事件
             agent_def: Agent 定义对象，包含 prompt、工具、模型等配置
         """
+        sem = self._get_or_create_semaphore(agent_def)
         session_id = event.session_id
 
-        try:
-            # 使用 Agent 定义和全局上下文创建 Agent 实例
-            agent = Agent(agent_def, self.context)
+        async with sem:
+            try:
+                # 使用 Agent 定义和全局上下文创建 Agent 实例
+                agent = Agent(agent_def, self.context)
 
-            if session_id:
-                try:
-                    # 尝试恢复已有会话（加载历史消息上下文）
-                    session = agent.resume_session(session_id)
-                except ValueError:
-                    # 会话不存在（可能是首次对话或历史被清理），创建新会话并绑定原 session_id
-                    logger.warning(f"Session {session_id} not found, creating new")
-                    session = agent.new_session(session_id=session_id)
-            else:
-                # 没有 session_id 时创建全新会话，由 Agent 自动生成 session_id
-                session = agent.new_session()
-                session_id = session.session_id
+                if session_id:
+                    try:
+                        # 尝试恢复已有会话（加载历史消息上下文）
+                        session = agent.resume_session(session_id)
+                    except ValueError:
+                        # 会话不存在（可能是首次对话或历史被清理），创建新会话并绑定原 session_id
+                        logger.warning(f"Session {session_id} not found, creating new")
+                        session = agent.new_session(session_id=session_id)
+                else:
+                    # 没有 session_id 时创建全新会话，由 Agent 自动生成 session_id
+                    session = agent.new_session()
+                    session_id = session.session_id
 
-            # ── 斜杠命令优先处理 ──
-            # 如果用户消息以 "/" 开头（如 /help、/reset），优先尝试命令分发
-            if event.content.startswith("/"):
-                result = await self.context.command_registry.dispatch(
-                    event.content, session
-                )
-                if result:
-                    # 命令匹配并执行成功，直接返回命令结果，跳过 Agent 对话流程
-                    await self._emit_response(event, result, agent_def.id)
-                    logger.info(f"Command completed: {session_id}")
-                    return
-                # 如果命令未匹配（result 为空），则继续走 Agent 对话流程
+                # ── 斜杠命令优先处理 ──
+                # 如果用户消息以 "/" 开头（如 /help、/reset），优先尝试命令分发
+                if event.content.startswith("/"):
+                    result = await self.context.command_registry.dispatch(
+                        event.content, session
+                    )
+                    if result:
+                        # 命令匹配并执行成功，直接返回命令结果，跳过 Agent 对话流程
+                        await self._emit_response(event, result, agent_def.id)
+                        logger.info(f"Command completed: {session_id}")
+                        return
+                    # 如果命令未匹配（result 为空），则继续走 Agent 对话流程
 
-            # ── 执行 Agent 对话 ──
-            # 将用户消息发送给 Agent，Agent 内部会调用 LLM 并处理工具调用
-            response = await session.chat(event.content)
-            logger.info(f"Session completed: {session_id}")
+                # ── 执行 Agent 对话 ──
+                # 将用户消息发送给 Agent，Agent 内部会调用 LLM 并处理工具调用
+                response = await session.chat(event.content)
+                logger.info(f"Session completed: {session_id}")
 
-            await self._emit_response(event, response, agent_def.id)
-        except Exception as e:
-            # ── 异常处理与重试机制 ──
-            logger.error(f"Session failed: {e}")
+                await self._emit_response(event, response, agent_def.id)
+            except Exception as e:
+                # ── 异常处理与重试机制 ──
+                logger.error(f"Session failed: {e}")
 
-            if event.retry_count < MAX_RETRIES:
-                # 重试次数未耗尽：创建一个重试事件重新投入事件总线
-                # 使用 dataclasses.replace() 创建新事件（dataclass 不可变，不能直接修改字段）
-                retry_event = replace(
-                    event,
-                    retry_count=event.retry_count + 1,  # 递增重试计数
-                    content=".",  # 重试时使用最小化消息内容，避免重复发送原始用户消息
-                )
-                # 将重试事件发布回事件总线，AgentWorker 会再次收到并处理
-                await self.context.eventbus.publish(retry_event)
-            else:
-                # 重试次数已耗尽，向用户返回错误信息
-                await self._emit_response(event, "", agent_def.id, str(e))
+                if event.retry_count < MAX_RETRIES:
+                    # 重试次数未耗尽：创建一个重试事件重新投入事件总线
+                    # 使用 dataclasses.replace() 创建新事件（dataclass 不可变，不能直接修改字段）
+                    retry_event = replace(
+                        event,
+                        retry_count=event.retry_count + 1,  # 递增重试计数
+                        content=".",  # 重试时使用最小化消息内容，避免重复发送原始用户消息
+                    )
+                    # 将重试事件发布回事件总线，AgentWorker 会再次收到并处理
+                    await self.context.eventbus.publish(retry_event)
+                else:
+                    # 重试次数已耗尽，向用户返回错误信息
+                    await self._emit_response(event, "", agent_def.id, str(e))
+
+        self._maybe_cleanup_semaphores(agent_def)
 
     async def _emit_response(self,
                              event: ProcessableEvent,
@@ -185,3 +199,21 @@ class AgentWorker(SubscribeWorker):
                 error=str(error) if error else None,  # 确保 error 为字符串类型或 None
             )
         await self.context.eventbus.publish(result_event)
+
+    def _get_or_create_semaphore(self, agent_def: "AgentDef") -> asyncio.Semaphore:
+        """Get existing or create new semaphore for agent"""
+        if agent_def.id not in self._semaphores:
+            self._semaphores[agent_def.id] = asyncio.Semaphore(
+                agent_def.max_concurrency
+            )
+        logger.debug(
+            f"Created semaphore for {agent_def.id} with value {agent_def.max_concurrency}"
+        )
+        return self._semaphores[agent_def.id]
+
+    def _maybe_cleanup_semaphores(self, agent_def: "AgentDef") -> None:
+        """Remove semaphores for certain agents"""
+        if agent_def.id not in self._semaphores:
+            return
+        if not self._semaphores[agent_def.id]._waiters:
+            del self._semaphores[agent_def.id]
