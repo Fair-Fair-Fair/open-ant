@@ -8,6 +8,7 @@ from ant.utils.config import Config, LLMConfig
 from ant.utils.def_loader import (
     DefNotFoundError,
     InvalidDefError,
+    discover_definitions,
     parse_definition,
 )
 
@@ -49,6 +50,14 @@ class AgentLoader:
             raise InvalidDefError("agent", agent_id, str(e))
 
         return agent_def
+
+    def discover_agents(self) -> list[AgentDef]:
+        """Scan agents directory and return list of valid agentdef"""
+        return discover_definitions(
+            self.config.agents_path,
+            "AGENT.md",
+            self._parse_agent_def,
+        )
 
     def _parse_agent_def(
         self, def_id: str, frontmatter: dict[str, Any], body: str

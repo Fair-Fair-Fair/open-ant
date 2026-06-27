@@ -3,11 +3,11 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from ant.core.agent import Agent
+# from ant.core.agent import Agent
 
 from .worker import Worker
 from ant.core.events import EventSource, InboundEvent
-from ant.utils.config import SourceSessionConfig
+# from ant.utils.config import SourceSessionConfig
 
 if TYPE_CHECKING:
     from ant.core.context import SharedContext
@@ -58,7 +58,7 @@ class ChannelWorker(Worker):
                             "default_delivery_source", source_str_value
                         )
 
-                session_id = self._get_or_create_session_id(source)
+                session_id = self.context.routing_table.get_or_create_session_id(source)
 
                 # Publish INBOUND event with typed  source
                 event = InboundEvent(
@@ -74,22 +74,3 @@ class ChannelWorker(Worker):
                 self.logger.error(f"Error processing message from {platform}: {e}")
 
         return callback
-
-    def _get_or_create_session_id(self, source: EventSource) -> str:
-        """Get or create session ID for a given source"""
-        source_str = str(source)
-
-        source_session = self.context.config.sources.get(source_str)
-        if source_session:
-            return source_session.session_id
-
-        agent_def = self.context.agent_loader.load(self.context.config.default_agent)
-        agent = Agent(agent_def, self.context)
-        session = agent.new_session(source)
-
-        # Cache the session
-        self.context.config.set_runtime(
-            f"sources.{source_str}", SourceSessionConfig(session_id=session.session_id)
-        )
-
-        return session.session_id

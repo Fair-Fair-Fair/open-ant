@@ -58,7 +58,8 @@ class CommandRegistry:
         """Create registry with built-in commands registered"""
         from ant.core.commands.handlers import (
             HelpCommand, SkillsCommand, SessionCommand,
-            ContextCommand, CompactCommand
+            ContextCommand, CompactCommand,
+            ClearCommand, AgentCommand, RouteCommand, BindingCommand
         )
 
         registry = cls()
@@ -68,5 +69,10 @@ class CommandRegistry:
 
         registry.register(CompactCommand())
         registry.register(ContextCommand())
+
+        registry.register(ClearCommand())
+        registry.register(AgentCommand())
+        registry.register(RouteCommand())
+        registry.register(BindingCommand())
 
         return registry

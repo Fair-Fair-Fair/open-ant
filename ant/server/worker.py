@@ -3,12 +3,15 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ant.core.context import SharedContext
 
 
 class Worker(ABC):
     """BAse class for all workers with lifecycle management"""
 
-    def __init__(self, context):
+    def __init__(self, context: "SharedContext"):
         self.context = context
         self.logger = logging.getLogger(f"mybot.server.{self.__class__.__name__}")
         self._task: asyncio.Task | None = None
