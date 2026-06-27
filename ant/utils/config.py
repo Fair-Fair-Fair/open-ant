@@ -100,6 +100,8 @@ class Config(BaseModel):
     # 12-cron-heartbeat
     crons_path: Path = Field(default=Path("crons"))
 
+    memories_path: Path = Field(default=Path("memories"))
+
     logging_path: Path = Field(default=Path(".logs"))
     history_path: Path = Field(default=Path(".history"))
     event_path: Path = Field(default=Path(".events"))
@@ -124,6 +126,7 @@ class Config(BaseModel):
             "logging_path",
             "event_path",
             "crons_path",
+            "memories_path",
         ):
             path = getattr(self, field_name)
             if not path.is_absolute():

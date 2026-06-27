@@ -15,6 +15,9 @@ from ant.tools.skill_tool import create_skill_tool
 from ant.tools.websearch_tool import create_websearch_tool
 from ant.tools.webread_tool import create_webread_tool
 
+# 14 post-message tool
+from ant.tools.post_message_tool import create_post_message_tool
+
 from litellm.types.completion import (
     ChatCompletionMessageParam as Message,
     ChatCompletionMessageToolCallParam,
@@ -34,7 +37,7 @@ class Agent:
         self.context = context
         self.llm = LLMProvider.from_config(agent_def.llm)
 
-    def _build_tools(self) -> ToolRegistry:
+    def _build_tools(self, include_post_message: bool) -> ToolRegistry:
         """Build a ToolRegistry with tools appropriate for the session."""
         registry = ToolRegistry.with_builtins()
 
@@ -52,6 +55,11 @@ class Agent:
         if webread_tool:
             registry.register(webread_tool)
 
+        if include_post_message:
+            post_message_tool = create_post_message_tool(self.context)
+            if post_message_tool:
+                registry.register(post_message_tool)
+
         return registry
 
     def _get_token_threshold(self) -> int:
@@ -66,7 +74,9 @@ class Agent:
     ) -> "AgentSession":
         """Create a new conversation session."""
         session_id = session_id or str(uuid.uuid4())
-        tools = self._build_tools()
+
+        include_post_message = source.is_cron
+        tools = self._build_tools(include_post_message)
 
         # Create context guard for this session
         context_guard = ContextGuard(
@@ -113,8 +123,9 @@ class Agent:
         # Convert HistoryMessage to litellm Message format
         messages: list[Message] = [msg.to_message() for msg in history_messages]
 
+        include_post_message = source.is_cron
         # Build tools for resumed session
-        tools = self._build_tools()
+        tools = self._build_tools(include_post_message)
 
         # Create context guard
         context_guard = ContextGuard(

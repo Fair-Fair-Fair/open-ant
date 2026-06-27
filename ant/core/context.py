@@ -17,6 +17,9 @@ from ant.core.routing import RoutingTable
 # 12-cron-heartbeat
 from ant.core.cron_loader import CronLoader
 
+# 13 multi-layer-prompt
+from ant.core.prompt_builder import PromptBuilder
+
 
 class SharedContext:
     """Global shared state for the application"""
@@ -35,6 +38,9 @@ class SharedContext:
 
     # 11 multi-agent-routing
     routing_table: RoutingTable
+
+    # 13 multi-layer-prompt
+    prompt_builder: PromptBuilder
 
     def __init__(self, config: Config,
                  channels: list[Channel[Any]] | None = None) -> None:
@@ -55,3 +61,4 @@ class SharedContext:
         self.routing_table = RoutingTable(self)
 
         self.cron_loader = CronLoader.from_config(config)
+        self.prompt_builder = PromptBuilder(self)

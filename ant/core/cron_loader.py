@@ -33,21 +33,20 @@ class CronDef(BaseModel):
     @field_validator("schedule")
     @classmethod
     def validate_schedule(cls, v: str) -> str:
-        """Validate cron expression and enforce 5-minute minimum granularity"""
+        """Validate cron expression and enforce 1-minute minimum granularity"""
         if not croniter.is_valid(v):
             raise ValueError(f"Invalid cron expression: {v}")
 
-        # Check minimum 5-minute granularity using croniter
-        # Get the frist two run times and check the gap
+        # Check minimum 1-minute granularity using croniter
         base = datetime(2024, 1, 1, 0, 0)
         cron = croniter(v, base)
         first_run = cron.get_next(datetime)
         second_run = cron.get_next(datetime)
         gap_minutes = (second_run - first_run).total_seconds() / 60
 
-        if gap_minutes < 5:
+        if gap_minutes < 1:
             raise ValueError(
-                f"Schedule must have minimum 5-minute granularity. Got: {v} (runs every {gap_minutes:.0f} min)"
+                f"Schedule must have minimum 1-minute granularity. Got: {v} (runs every {gap_minutes:.0f} min)"
             )
 
         return v

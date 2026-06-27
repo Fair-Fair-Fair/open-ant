@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from re import Pattern
@@ -75,7 +76,12 @@ class RoutingTable:
 
         source_session = self.context.config.sources.get(source_str)
         if source_session:
-            return source_session.session_id
+            existing = self.context.history_store.get_session_info(source_session.session_id)
+            if existing:
+                return source_session.session_id
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Cached session {source_session.session_id} not found in history, creating new")
+            self.context.config.sources.pop(source_str, None)
 
         agent_id = self.resolve(source_str)
         agent_def = self.context.agent_loader.load(agent_id)

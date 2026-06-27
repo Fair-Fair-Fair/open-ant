@@ -10,10 +10,14 @@ Agent 工作模块 —— 负责接收入站事件并将其分发给对应的 Ag
 import asyncio
 import logging
 from dataclasses import replace  # 用于不可变 dataclass 的字段替换（如重试时递增 retry_count）
+from typing import Union
 
 from .worker import SubscribeWorker  # 基类：提供事件订阅型 Worker 的基础能力
 from ant.core.agent import Agent  # Agent 核心类，封装 LLM 对话逻辑
-from ant.core.events import InboundEvent, OutboundEvent, AgentEventSource  # 入站/出站事件数据模型
+from ant.core.events import (
+    InboundEvent, OutboundEvent, AgentEventSource,
+    DispatchEvent, DispatchResultEvent, # 入站/出站事件数据模型
+)
 
 from ant.utils.def_loader import DefNotFoundError  # Agent/Skill 定义加载失败的异常
 
@@ -22,6 +26,8 @@ from ant.utils.def_loader import DefNotFoundError  # Agent/Skill 定义加载失
 MAX_RETRIES = 3
 
 logger = logging.getLogger(__name__)
+
+ProcessableEvent = Union[InboundEvent, DispatchEvent]
 
 
 class AgentWorker(SubscribeWorker):
@@ -40,7 +46,8 @@ class AgentWorker(SubscribeWorker):
         # 在事件总线中订阅 InboundEvent 类型的事件，回调函数为 dispatch_event
         # 每当有用户消息等入站事件时，都会触发 dispatch_event
         self.context.eventbus.subscribe(InboundEvent, self.dispatch_event)
-        self.logger.info("AgentWorker subscribed to InboundEvent events")
+        self.context.eventbus.subscribe(DispatchEvent, self.dispatch_event)
+        self.logger.info("AgentWorker subscribed to InboundEvent and DispatchEvent events")
 
     async def dispatch_event(self, event: InboundEvent) -> None:
         """Create executor task for typed event.
@@ -57,12 +64,12 @@ class AgentWorker(SubscribeWorker):
         """
         # 从历史记录存储中获取会话信息，session_info 中包含 agent_id（标识使用哪个 Agent）
         session_info = self.context.history_store.get_session_info(event.session_id)
-        if not session_info:
-            logger.error(f"Session not found: {event.session_id}")
-            return
 
-        # 从会话信息中提取 agent_id，这是确定使用哪个 Agent 定义的唯一来源（single source of truth）
-        agent_id = session_info.agent_id
+        if session_info:
+            agent_id = session_info.agent_id
+        else:
+            logger.warning(f"Session not found: {event.session_id}, falling back to routing")
+            agent_id = self.context.routing_table.resolve(str(event.source))
 
         try:
             # 加载 Agent 定义（包含 system prompt、可用工具、模型配置等）
@@ -76,7 +83,7 @@ class AgentWorker(SubscribeWorker):
         # 使用 create_task 而非 await，使事件分发不被阻塞，可以立即处理下一个事件
         asyncio.create_task(self.exec_session(event, agent_def))
 
-    async def exec_session(self, event: InboundEvent, agent_def) -> None:
+    async def exec_session(self, event: ProcessableEvent, agent_def) -> None:
         """执行一次完整的 Agent 会话
         核心执行逻辑：
           1. 创建 Agent 实例并恢复/新建会话
@@ -146,7 +153,7 @@ class AgentWorker(SubscribeWorker):
                 await self._emit_response(event, "", agent_def.id, str(e))
 
     async def _emit_response(self,
-                             event: InboundEvent,
+                             event: ProcessableEvent,
                              content: str,
                              agent_id: str,
                              error: str | None = None) -> None:
@@ -163,10 +170,18 @@ class AgentWorker(SubscribeWorker):
             content: 响应正文内容（正常结果或空字符串）
             error: 可选的错误信息，非 None 时会转为字符串写入出站事件的 error 字段
         """
-        result_event = OutboundEvent(
-            session_id=event.session_id,
-            source=AgentEventSource(agent_id),
-            content=content,
-            error=str(error) if error else None,  # 确保 error 为字符串类型或 None
-        )
+        if isinstance(event, DispatchEvent):
+            result_event: OutboundEvent | DispatchResultEvent = DispatchResultEvent(
+                session_id=event.session_id,
+                source=AgentEventSource(agent_id),
+                content=content,
+                error=str(error) if error else None,  # 确保 error 为字符串类型或 None
+            )
+        else:
+            result_event = OutboundEvent(
+                session_id=event.session_id,
+                source=AgentEventSource(agent_id),
+                content=content,
+                error=str(error) if error else None,  # 确保 error 为字符串类型或 None
+            )
         await self.context.eventbus.publish(result_event)
