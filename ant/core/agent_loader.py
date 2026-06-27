@@ -20,6 +20,7 @@ class AgentDef(BaseModel):
     name: str
     description: str = ""
     agent_md: str
+    soul_md: str = "" # personality layer (optional)
     llm: LLMConfig
     allow_skills: bool = False
 
@@ -66,17 +67,28 @@ class AgentLoader:
         llm_overrides = frontmatter.get("llm")
         merged_llm = self._merge_llm_config(llm_overrides)
 
+        # Load SOUL.md if exists
+        soul_md = self._load_soul_md(def_id)
+
         try:
             return AgentDef(
                 id=def_id,
                 name=frontmatter["name"],  # type: ignore[misc]
                 description=frontmatter.get("description", ""),
                 agent_md=body.strip(),
+                soul_md=soul_md,
                 llm=merged_llm,
                 allow_skills=frontmatter.get("allow_skills", False),
             )
         except ValidationError as e:
             raise InvalidDefError("agent", def_id, str(e))
+
+    def _load_soul_md(self, agent_def: str) -> str:
+        """Load SOUL.md file for an agent if exists"""
+        soul_file = self.config.agents_path / agent_def / "SOUL.md"
+        if soul_file.exists():
+            return soul_file.read_text().strip()
+        return ""
 
     def _merge_llm_config(self, agent_llm: dict[str, Any] | None) -> LLMConfig:
         """Deep merge agent's llm config with global defaults."""
