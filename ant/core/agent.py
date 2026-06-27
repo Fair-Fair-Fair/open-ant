@@ -17,7 +17,8 @@ from ant.tools.webread_tool import create_webread_tool
 
 # 14 post-message tool
 from ant.tools.post_message_tool import create_post_message_tool
-
+# 15 agent-dispatch
+from ant.tools.subagent_tool import create_subagent_dispatch_tool
 from litellm.types.completion import (
     ChatCompletionMessageParam as Message,
     ChatCompletionMessageToolCallParam,
@@ -59,6 +60,13 @@ class Agent:
             post_message_tool = create_post_message_tool(self.context)
             if post_message_tool:
                 registry.register(post_message_tool)
+
+        # Register subagent dispatch tool
+        subagent_tool = create_subagent_dispatch_tool(
+            self.agent_def.id, self.context
+        )
+        if subagent_tool:
+            registry.register(subagent_tool)
 
         return registry
 
