@@ -1,4 +1,5 @@
 """Prompt builder that assembles system prompt from layers"""
+import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -37,6 +38,10 @@ class PromptBuilder:
         )
         # layer 5: Channel hint
         layers.append(self._build_channel_hint(state.source))
+
+        # layer 6: Memory context (RAG, pre-retrieved)
+        if state.memory_context:
+            layers.append(state.memory_context)
 
         return "\n\n".join(layers)
 
@@ -94,3 +99,12 @@ class PromptBuilder:
             return f"You are responding via {source.platform_name}."
         else:
             raise ValueError(f"Unknown source type: {source}")
+
+    def _get_last_user_message(self, state: "SessionState") -> str:
+        """Extract the last user message from session state."""
+        for msg in reversed(state.messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if content:
+                    return content
+        return ""

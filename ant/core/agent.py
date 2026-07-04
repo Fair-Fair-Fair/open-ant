@@ -19,6 +19,8 @@ from ant.tools.webread_tool import create_webread_tool
 from ant.tools.post_message_tool import create_post_message_tool
 # 15 agent-dispatch
 from ant.tools.subagent_tool import create_subagent_dispatch_tool
+# 17 document ingestion
+from ant.tools.doc_ingest_tool import ingest_document
 from litellm.types.completion import (
     ChatCompletionMessageParam as Message,
     ChatCompletionMessageToolCallParam,
@@ -55,6 +57,10 @@ class Agent:
         webread_tool = create_webread_tool(self.context.config)
         if webread_tool:
             registry.register(webread_tool)
+
+        # Register document ingest tool if memory is enabled
+        if self.context.doc_ingester is not None:
+            registry.register(ingest_document)
 
         if include_post_message:
             post_message_tool = create_post_message_tool(self.context)
@@ -188,6 +194,9 @@ class AgentSession:
         user_msg: Message = {"role": "user", "content": message}
         self.state.add_message(user_msg)
 
+        # RAG: retrieve relevant memories before building prompt
+        await self._retrieve_memories()
+
         tool_schemas = self.tools.get_tool_schemas()
         logger = logging.getLogger(__name__)
 
@@ -229,7 +238,127 @@ class AgentSession:
 
             break
 
+        # RAG: asynchronously extract memories from this conversation
+        task = asyncio.create_task(self._maybe_extract_memories())
+        task.add_done_callback(self._on_memory_extraction_done)
+
         return content
+
+    def _on_memory_extraction_done(self, task: asyncio.Task) -> None:
+        """Callback to log any unhandled exceptions from memory extraction."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Memory extraction task failed: {exc}")
+
+    async def _retrieve_memories(self) -> None:
+        """Retrieve relevant memories and inject into session state."""
+        retriever = self.shared_context.memory_retriever
+        if not retriever:
+            return
+
+        last_user_msg = self.state.messages[-1].get("content", "") if self.state.messages else ""
+        if not last_user_msg:
+            return
+
+        logger = logging.getLogger(__name__)
+        try:
+            memories = await retriever.retrieve(last_user_msg)
+            if memories:
+                self.state.memory_context = retriever.format_for_prompt(memories)
+                logger.debug(f"Retrieved {len(memories)} memories for session {self.session_id}")
+        except Exception as e:
+            logger.debug(f"Memory retrieval failed: {e}")
+
+    async def _maybe_extract_memories(self) -> None:
+        """Extract and store memories if conditions are met."""
+        memory_guard = self.shared_context.memory_guard
+        if not memory_guard:
+            return
+
+        logger = logging.getLogger(__name__)
+
+        try:
+            new_messages = self.state.messages[self.state._last_extracted_idx:]
+            new_user_count = len([m for m in new_messages if m.get("role") == "user"])
+            threshold = self.shared_context.config.memory.extraction_threshold
+            if new_user_count < threshold:
+                logger.debug(
+                    f"Skipping memory extraction: {new_user_count} new user messages < threshold {threshold}"
+                )
+                return
+
+            logger.info(f"Attempting memory extraction from {new_user_count} new user messages in session {self.session_id}")
+            memories = await memory_guard.extract_memories(new_messages)
+            if not memories:
+                logger.info(f"No important memories extracted from session {self.session_id}")
+                return
+
+            vector_store = self.shared_context.vector_store
+            now = datetime.now().isoformat()
+
+            for mem in memories:
+                # 检查是否有更新指令
+                if mem.get("_action") == "update" and mem.get("_target"):
+                    target_id = mem["_target"]
+                    # 获取旧文档
+                    old_docs = await vector_store.get([target_id])
+                    if old_docs:
+                        old_meta = old_docs[0].metadata
+                        # 保留 created_at，更新其他字段
+                        new_meta = {
+                            "category": mem.get("category", "fact"),
+                            "importance": mem.get("importance", 5),
+                            "keywords": ",".join(mem.get("keywords", [])),
+                            "session_id": self.session_id,
+                            "created_at": old_meta.get("created_at", now),
+                            "updated_at": now,
+                        }
+                        await vector_store.update(
+                            id=target_id,
+                            document=mem["content"],
+                            metadata=new_meta,
+                        )
+                        logger.debug(f"Updated memory {target_id}: {mem['content']}")
+                    else:
+                        logger.warning(f"Target memory {target_id} not found, creating new instead")
+                        # fallback to create
+                        new_meta = {
+                            "category": mem.get("category", "fact"),
+                            "importance": mem.get("importance", 5),
+                            "keywords": ",".join(mem.get("keywords", [])),
+                            "session_id": self.session_id,
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                        await vector_store.add(
+                            documents=[mem["content"]],
+                            metadatas=[new_meta],
+                            ids=[target_id]  # 使用原ID
+                        )
+                        logger.info(f"✨ Created memory (fallback) {target_id}: {mem['content']}")  # 新增日志
+                else:
+                    # 普通创建
+                    new_meta = {
+                        "category": mem.get("category", "fact"),
+                        "importance": mem.get("importance", 5),
+                        "keywords": ",".join(mem.get("keywords", [])),
+                        "session_id": self.session_id,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                    await vector_store.add(
+                        documents=[mem["content"]],
+                        metadatas=[new_meta],
+                    )
+                    logger.info(f"✨ Created new memory: {mem['content']}")  # 新增日志
+
+            logger.info(f"Processed {len(memories)} memories from session {self.session_id}")
+            self.state._last_extracted_idx = len(self.state.messages)
+        except Exception as e:
+            logger.warning(f"Memory extraction failed: {e}", exc_info=True)
 
     async def _handle_tool_calls(
         self,

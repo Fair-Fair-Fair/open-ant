@@ -1,6 +1,6 @@
 """Session state container with persistence helpers."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from litellm.types.completion import ChatCompletionMessageParam as Message
@@ -22,6 +22,8 @@ class SessionState:
     messages: list[Message]
     source: "EventSource"
     shared_context: "SharedContext"
+    memory_context: str = field(default="")
+    _last_extracted_idx: int = field(default=0, repr=False)
 
     def add_message(self, message: Message) -> None:
         """Add message to in-memory list + persist."""

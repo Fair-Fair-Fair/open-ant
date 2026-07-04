@@ -51,6 +51,25 @@ class LangChainWebReadConfig(BaseModel):
     provider: Literal["langchain"] = "langchain"
 
 
+class MemoryConfig(BaseModel):
+    """Configuration for RAG memory system"""
+
+    enabled: bool = False
+    provider: Literal["chroma"] = "chroma"
+    persist_directory: Path = Field(default=Path(".memory"))
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    embedding_provider: str | None = None  # "litellm" 或 "sentence_transformers"，空则自动判断
+    top_k: int = Field(default=5, gt=0, le=20)
+    extraction_threshold: int = Field(default=5, gt=0)
+    min_importance: int = Field(default=5, ge=1, le=10)
+    merge_top_k: int = Field(default=3, gt=0, le=10)
+    merge_similarity: float = Field(default=0.85, gt=0.0, lt=1.0)
+    chunk_size: int = Field(default=1000, gt=0, le=10000)
+    chunk_overlap: int = Field(default=200, ge=0, le=2000)
+    docs_path: str | None = None
+    doc_similarity_threshold: float = Field(default=0.75, gt=0.0, lt=1.0)
+
+
 class TelegramConfig(BaseModel):
     """Telegram platform configuration"""
 
@@ -116,6 +135,9 @@ class Config(BaseModel):
     # 11-multi-agent-routing
     routing: dict = Field(default_factory=lambda: {"bindings": []})
 
+    # 16-rag-memory
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":
         """Resolve relative paths to absolute using workspace."""
@@ -131,6 +153,11 @@ class Config(BaseModel):
             path = getattr(self, field_name)
             if not path.is_absolute():
                 setattr(self, field_name, self.workspace / path)
+
+        # Resolve memory persist_directory
+        if self.memory and not self.memory.persist_directory.is_absolute():
+            self.memory.persist_directory = self.workspace / self.memory.persist_directory
+
         return self
 
     @classmethod
@@ -253,6 +280,10 @@ class ConfigHandler(FileSystemEventHandler):
                 logging.info("Config reloaded successfully")
             else:
                 logging.warning("Config reload failed")
+
+
+"""Observer (观察者)：核心组件，在后台线程中运行，负责向操作系统注册监控路径并监听事件，
+当文件系统事件发生时，会调用相应的回调函数。它管理着所有已注册的观察者，并在事件发生时，根据事件的类型调用相应的回调函数。"""
 
 
 class ConfigReloader:

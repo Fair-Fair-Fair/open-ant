@@ -62,3 +62,9 @@ class SubscribeWorker(Worker):
             await asyncio.Future()
         except asyncio.CancelledError:
             pass
+"""
+SubscribeWorker 是一个被动型的“空转”占位工作器。它的核心作用不是“做具体工作”，
+而是利用 Worker 基类的生命周期管理能力，来托管那些完全依赖事件回调（Event Handlers）的异步组件。
+
+可以把它理解为：“我本身不干活，但我负责把‘自己还在运行’这个状态占住，让框架能统一监控和停止我。”
+"""

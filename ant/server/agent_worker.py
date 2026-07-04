@@ -91,6 +91,7 @@ class AgentWorker(SubscribeWorker):
 
         # 以异步任务方式启动会话执行
         # 使用 create_task 而非 await，使事件分发不被阻塞，可以立即处理下一个事件
+        # 注意这里是 create_task 而非 await，这意味着 dispatch_event 会瞬间返回，不会阻塞 EventBus 的事件分发循环。
         asyncio.create_task(self.exec_session(event, agent_def))
 
     async def exec_session(self, event: ProcessableEvent, agent_def: "AgentDef") -> None:

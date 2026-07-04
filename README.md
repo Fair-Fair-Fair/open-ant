@@ -14,6 +14,10 @@
 
 ---
 ![](./images/OPENANT.png)
+
+> 📖 此仓库是 [build-your-own-openclaw](https://github.com/czl9707/build-your-own-openclaw) 的后续实现，我们计划加入 RAG、MCP、Java 生态通信等新功能。
+> 在阅读本仓库之前，您应当具有 LangChain 和 LangGraph 等 Agent 相关知识，或者跟随 build-your-own-openclaw 学习了如何开发 Agent 运行时框架。
+
 ## 🐜 Why Open-Ant?
 
 现实中的蚂蚁个体能力有限，但依靠**信息素（Pheromone）**、**分工协作**和**持续通信**，整个蚁群能够完成远超单个个体能力的复杂任务。

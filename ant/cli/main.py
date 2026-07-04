@@ -8,6 +8,7 @@ from rich.console import Console        # 引入让字变好看的工具
 
 from ant.cli.chat import chat_command
 from ant.cli.server import server_command
+from ant.cli.ingest import ingest_command
 from ant.utils.config import Config
 
 app = typer.Typer(
@@ -74,6 +75,15 @@ def chat(
 def server(ctx: typer.Context) -> None:
     """Start the 24/7 server for cron and messagebus execution."""
     server_command(ctx)
+
+
+@app.command("ingest")
+def ingest(
+    ctx: typer.Context,
+    path: str = typer.Argument(..., help="File or directory path to ingest"),
+) -> None:
+    """Ingest documents into the vector knowledge base for RAG."""
+    ingest_command(ctx, path)
 
 
 if __name__ == "__main__":
