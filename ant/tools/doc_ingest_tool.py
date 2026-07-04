@@ -12,8 +12,9 @@ if TYPE_CHECKING:
 @tool(
     name="ingest_document",
     description="Load a file or directory into the long-term memory knowledge base. "
-                "Supported types: .txt, .md, .py, .json, .csv, .html, etc. "
-                "The file will be split into chunks and stored for RAG retrieval.",
+                "⚠️ ONLY use this tool when the user EXPLICITLY asks to import/load/ingest documents into the knowledge base. "
+                "Do NOT use this tool to answer questions or search for information. "
+                "If the user asks a question about stored knowledge, use the search_knowledge tool instead.",
     parameters={
         "type": "object",
         "properties": {

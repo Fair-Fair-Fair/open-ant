@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Open-Ant · Chat</title>
+<style>
+/* ===== CSS Variables & Reset ===== */
+:root {
+  --blue-50: #eff6ff;
+  --blue-100: #dbeafe;
+  --blue-200: #bfdbfe;
+  --blue-300: #93c5fd;
+  --blue-400: #60a5fa;
+  --blue-500: #3b82f6;
+  --blue-600: #2563eb;
+  --blue-700: #1d4ed8;
+  --white: #ffffff;
+  --gray-50: #f8fafc;
+  --gray-100: #f1f5f9;
+  --gray-200: #e2e8f0;
+  --gray-300: #cbd5e1;
+  --gray-400: #94a3b8;
+  --gray-500: #64748b;
+  --gray-600: #475569;
+  --gray-700: #334155;
+  --gray-800: #1e293b;
+  --gray-900: #0f172a;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.05);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,.07), 0 2px 4px -2px rgba(0,0,0,.05);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.08), 0 4px 6px -4px rgba(0,0,0,.04);
+  --shadow-xl: 0 20px 25px -5px rgba(0,0,0,.08), 0 8px 10px -6px rgba(0,0,0,.04);
+  --radius: 16px;
+  --radius-sm: 10px;
+  --transition: .25s cubic-bezier(.4,0,.2,1);
+}
+
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+  background: linear-gradient(135deg, var(--blue-50) 0%, var(--white) 50%, var(--blue-50) 100%);
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--gray-800);
+  overflow: hidden;
+}
+
+/* ===== Animated background blobs ===== */
+body::before, body::after {
+  content: '';
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: .35;
+  z-index: 0;
+  animation: blobFloat 20s ease-in-out infinite alternate;
+}
+body::before {
+  width: 500px; height: 500px;
+  background: var(--blue-300);
+  top: -120px; left: -100px;
+}
+body::after {
+  width: 400px; height: 400px;
+  background: var(--blue-200);
+  bottom: -80px; right: -60px;
+  animation-delay: -10s;
+}
+@keyframes blobFloat {
+  0%   { transform: translate(0, 0) scale(1); }
+  50%  { transform: translate(40px, -30px) scale(1.08); }
+  100% { transform: translate(-20px, 20px) scale(.95); }
+}
+
+/* ===== Main container ===== */
+.chat-container {
+  position: relative;
+  z-index: 1;
+  width: min(900px, 95vw);
+  height: min(700px, 90vh);
+  display: flex;
+  flex-direction: column;
+  background: rgba(255,255,255,.72);
+  backdrop-filter: blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  border: 1px solid rgba(255,255,255,.6);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-xl);
+  overflow: hidden;
+  animation: containerIn .5s ease-out;
+}
+@keyframes containerIn {
+  from { opacity: 0; transform: translateY(24px) scale(.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ===== Header ===== */
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 24px;
+  background: linear-gradient(135deg, var(--blue-600), var(--blue-500));
+  color: var(--white);
+  flex-shrink: 0;
+}
+.chat-header .logo {
+  width: 42px; height: 42px;
+  background: rgba(255,255,255,.18);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  flex-shrink: 0;
+  backdrop-filter: blur(8px);
+}
+.chat-header .info { flex: 1; }
+.chat-header .info h1 {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -.02em;
+}
+.chat-header .info .subtitle {
+  font-size: 12px;
+  opacity: .8;
+  margin-top: 2px;
+}
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Agent selector */
+.agent-select {
+  appearance: none;
+  background: rgba(255,255,255,.15);
+  border: 1px solid rgba(255,255,255,.25);
+  border-radius: 8px;
+  color: var(--white);
+  padding: 6px 28px 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: var(--transition);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='white' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+.agent-select:hover { background: rgba(255,255,255,.25); }
+.agent-select option { color: var(--gray-800); background: var(--white); }
+
+/* Connection status */
+.conn-dot {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: #f87171;
+  transition: var(--transition);
+  flex-shrink: 0;
+}
+.conn-dot.connected { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+
+/* ===== Messages area ===== */
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  scroll-behavior: smooth;
+}
+.chat-messages::-webkit-scrollbar { width: 5px; }
+.chat-messages::-webkit-scrollbar-track { background: transparent; }
+.chat-messages::-webkit-scrollbar-thumb { background: var(--gray-300); border-radius: 10px; }
+
+/* Message bubble */
+.message {
+  display: flex;
+  gap: 10px;
+  max-width: 80%;
+  animation: msgIn .35s ease-out;
+}
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.message.user { align-self: flex-end; flex-direction: row-reverse; }
+.message.agent { align-self: flex-start; }
+
+.msg-avatar {
+  width: 34px; height: 34px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.message.user .msg-avatar {
+  background: linear-gradient(135deg, var(--blue-500), var(--blue-600));
+  color: var(--white);
+}
+.message.agent .msg-avatar {
+  background: linear-gradient(135deg, var(--blue-100), var(--blue-200));
+  color: var(--blue-600);
+}
+
+.msg-bubble {
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  line-height: 1.6;
+  font-size: 14px;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.message.user .msg-bubble {
+  background: linear-gradient(135deg, var(--blue-500), var(--blue-600));
+  color: var(--white);
+  border-bottom-right-radius: 4px;
+  box-shadow: 0 2px 8px rgba(37,99,235,.2);
+}
+.message.agent .msg-bubble {
+  background: var(--white);
+  color: var(--gray-800);
+  border-bottom-left-radius: 4px;
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--gray-100);
+}
+
+.msg-time {
+  font-size: 11px;
+  color: var(--gray-400);
+  margin-top: 4px;
+  padding: 0 4px;
+}
+.message.user .msg-time { text-align: right; }
+
+/* Typing indicator */
+.typing-indicator {
+  display: none;
+  align-self: flex-start;
+  gap: 10px;
+  max-width: 80%;
+  animation: msgIn .3s ease-out;
+}
+.typing-indicator.visible { display: flex; }
+.typing-dots {
+  display: flex;
+  gap: 4px;
+  padding: 14px 18px;
+  background: var(--white);
+  border-radius: var(--radius-sm);
+  border-bottom-left-radius: 4px;
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--gray-100);
+  align-items: center;
+}
+.typing-dots span {
+  width: 7px; height: 7px;
+  background: var(--blue-400);
+  border-radius: 50%;
+  animation: dotBounce 1.4s ease-in-infinite;
+}
+.typing-dots span:nth-child(2) { animation-delay: .16s; }
+.typing-dots span:nth-child(3) { animation-delay: .32s; }
+@keyframes dotBounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: .4; }
+  30% { transform: translateY(-6px); opacity: 1; }
+}
+
+/* Welcome screen */
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px;
+  text-align: center;
+  animation: fadeIn .6s ease-out;
+}
+@keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+.welcome .icon { font-size: 48px; }
+.welcome h2 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--gray-800);
+}
+.welcome p {
+  font-size: 14px;
+  color: var(--gray-500);
+  max-width: 360px;
+  line-height: 1.6;
+}
+
+/* ===== Input area ===== */
+.chat-input-area {
+  padding: 16px 24px 20px;
+  background: rgba(255,255,255,.6);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid var(--gray-100);
+  flex-shrink: 0;
+}
+.input-wrapper {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  background: var(--white);
+  border: 2px solid var(--gray-200);
+  border-radius: 14px;
+  padding: 6px 6px 6px 16px;
+  transition: var(--transition);
+  box-shadow: var(--shadow-sm);
+}
+.input-wrapper:focus-within {
+  border-color: var(--blue-400);
+  box-shadow: 0 0 0 3px rgba(59,130,246,.12);
+}
+
+.input-wrapper textarea {
+  flex: 1;
+  border: none;
+  outline: none;
+  resize: none;
+  font-size: 14px;
+  line-height: 1.5;
+  font-family: inherit;
+  color: var(--gray-800);
+  background: transparent;
+  max-height: 120px;
+  min-height: 24px;
+  padding: 6px 0;
+}
+.input-wrapper textarea::placeholder { color: var(--gray-400); }
+
+.send-btn {
+  width: 38px; height: 38px;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--blue-500), var(--blue-600));
+  color: var(--white);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+  flex-shrink: 0;
+}
+.send-btn:hover { transform: scale(1.06); box-shadow: 0 4px 12px rgba(37,99,235,.3); }
+.send-btn:active { transform: scale(.95); }
+.send-btn:disabled { opacity: .4; cursor: not-allowed; transform: none; box-shadow: none; }
+.send-btn svg { width: 18px; height: 18px; }
+
+/* ===== Responsive ===== */
+@media (max-width: 640px) {
+  .chat-container { width: 100vw; height: 100vh; border-radius: 0; }
+  .message { max-width: 90%; }
+  .chat-header { padding: 14px 16px; }
+  .chat-messages { padding: 16px; }
+  .chat-input-area { padding: 12px 16px 16px; }
+}
+</style>
+</head>
+<body>
+
+<div class="chat-container">
+  <!-- Header -->
+  <div class="chat-header">
+    <div class="logo">🐜</div>
+    <div class="info">
+      <h1>Open-Ant</h1>
+      <div class="subtitle" id="statusText">正在连接…</div>
+    </div>
+    <div class="header-right">
+      <select class="agent-select" id="agentSelect" title="选择 Agent">
+        <option value="">加载中…</option>
+      </select>
+      <div class="conn-dot" id="connDot" title="连接状态"></div>
+    </div>
+  </div>
+
+  <!-- Messages -->
+  <div class="chat-messages" id="chatMessages">
+    <div class="welcome" id="welcomeScreen">
+      <div class="icon">🐜</div>
+      <h2>欢迎使用 Open-Ant</h2>
+      <p>选择你的 Agent，然后在下方输入消息开始对话。支持实时通信，消息即时送达。</p>
+    </div>
+    <div class="typing-indicator" id="typingIndicator">
+      <div class="msg-avatar" style="background:linear-gradient(135deg,var(--blue-100),var(--blue-200));color:var(--blue-600);">🐜</div>
+      <div class="typing-dots">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div class="chat-input-area">
+    <div class="input-wrapper">
+      <textarea id="msgInput" rows="1" placeholder="输入消息… (Enter 发送, Shift+Enter 换行)"
+                autofocus></textarea>
+      <button class="send-btn" id="sendBtn" disabled title="发送">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"/>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const chatMessages = $('chatMessages');
+  const welcomeScreen = $('welcomeScreen');
+  const typingIndicator = $('typingIndicator');
+  const msgInput = $('msgInput');
+  const sendBtn = $('sendBtn');
+  const connDot = $('connDot');
+  const statusText = $('statusText');
+  const agentSelect = $('agentSelect');
+
+  let ws = null;
+  let currentAgentId = '';
+  let userId = 'web-' + Math.random().toString(36).slice(2, 8);
+  let reconnectTimer = null;
+  let reconnectDelay = 1000;
+  let streamingBubble = null;
+
+  async function loadAgents() {
+    try {
+      const [agentsRes, configRes] = await Promise.all([
+        fetch('/api/agents'),
+        fetch('/api/config'),
+      ]);
+      const agents = await agentsRes.json();
+      const config = await configRes.json();
+
+      agentSelect.innerHTML = '';
+      if (Array.isArray(agents) && agents.length) {
+        agents.forEach(a => {
+          const opt = document.createElement('option');
+          opt.value = a.id;
+          opt.textContent = a.name + (a.description ? ` — ${a.description}` : '');
+          agentSelect.appendChild(opt);
+        });
+        currentAgentId = config.default_agent || agents[0].id;
+        agentSelect.value = currentAgentId;
+      } else {
+        agentSelect.innerHTML = '<option value="">无可用 Agent</option>';
+      }
+    } catch (e) {
+      agentSelect.innerHTML = '<option value="">加载失败</option>';
+      console.error('Failed to load agents:', e);
+    }
+  }
+
+  agentSelect.addEventListener('change', () => {
+    currentAgentId = agentSelect.value;
+  });
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/web_socket`);
+
+    ws.onopen = () => {
+      connDot.classList.add('connected');
+      statusText.textContent = '在线';
+      reconnectDelay = 1000;
+    };
+
+    ws.onclose = (e) => {
+      connDot.classList.remove('connected');
+      statusText.textContent = '已断开，正在重连…';
+      scheduleReconnect();
+    };
+
+    ws.onerror = () => {
+      statusText.textContent = '连接错误';
+    };
+
+    ws.onmessage = (e) => {
+      let data;
+      try { data = JSON.parse(e.data); } catch { return; }
+
+      if (data.type === 'StreamChunkEvent' && data.content) {
+        hideTyping();
+        appendStreamToken(data.content);
+      }
+
+      if (data.type === 'OutboundEvent') {
+        hideTyping();
+        finalizeStream(data.content);
+      }
+
+      if (data.type === 'error') {
+        hideTyping();
+        finalizeStream('');
+        appendMessage('agent', `⚠️ ${data.message || '发生错误'}`);
+      }
+    };
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => {
+      reconnectDelay = Math.min(reconnectDelay * 1.5, 8000);
+      connect();
+    }, reconnectDelay);
+  }
+
+  function sendMessage() {
+    const text = msgInput.value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const payload = {
+      source: userId,
+      content: text,
+    };
+    if (currentAgentId) payload.agent_id = currentAgentId;
+
+    ws.send(JSON.stringify(payload));
+    appendMessage('user', text);
+    msgInput.value = '';
+    autoResize();
+    updateSendBtn();
+    showTyping();
+    streamingBubble = null;
+  }
+
+  function appendMessage(role, content) {
+    if (welcomeScreen) welcomeScreen.style.display = 'none';
+
+    const wrap = document.createElement('div');
+    wrap.className = `message ${role}`;
+
+    const avatar = document.createElement('div');
+    avatar.className = 'msg-avatar';
+    avatar.textContent = role === 'user' ? '🧑' : '🐜';
+
+    const body = document.createElement('div');
+    body.style.display = 'flex';
+    body.style.flexDirection = 'column';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.textContent = content;
+
+    const time = document.createElement('div');
+    time.className = 'msg-time';
+    time.textContent = new Date().toLocaleTimeString('zh-CN', { hour:'2-digit', minute:'2-digit' });
+
+    body.appendChild(bubble);
+    body.appendChild(time);
+    wrap.appendChild(avatar);
+    wrap.appendChild(body);
+
+    chatMessages.insertBefore(wrap, typingIndicator);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  function appendStreamToken(token) {
+    if (!streamingBubble) {
+      if (welcomeScreen) welcomeScreen.style.display = 'none';
+
+      const wrap = document.createElement('div');
+      wrap.className = 'message agent';
+
+      const avatar = document.createElement('div');
+      avatar.className = 'msg-avatar';
+      avatar.textContent = '🐜';
+
+      const body = document.createElement('div');
+      body.style.display = 'flex';
+      body.style.flexDirection = 'column';
+
+      const bubble = document.createElement('div');
+      bubble.className = 'msg-bubble';
+      bubble.textContent = '';
+
+      const time = document.createElement('div');
+      time.className = 'msg-time';
+      time.textContent = new Date().toLocaleTimeString('zh-CN', { hour:'2-digit', minute:'2-digit' });
+
+      body.appendChild(bubble);
+      body.appendChild(time);
+      wrap.appendChild(avatar);
+      wrap.appendChild(body);
+
+      chatMessages.insertBefore(wrap, typingIndicator);
+      streamingBubble = bubble;
+    }
+
+    streamingBubble.textContent += token;
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  function finalizeStream(finalContent) {
+    if (streamingBubble && finalContent) {
+      streamingBubble.textContent = finalContent;
+    }
+    streamingBubble = null;
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  function showTyping() {
+    typingIndicator.classList.add('visible');
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+  function hideTyping() {
+    typingIndicator.classList.remove('visible');
+  }
+
+  function autoResize() {
+    msgInput.style.height = 'auto';
+    msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+  }
+  function updateSendBtn() {
+    sendBtn.disabled = !msgInput.value.trim() || !ws || ws.readyState !== WebSocket.OPEN;
+  }
+
+  msgInput.addEventListener('input', () => { autoResize(); updateSendBtn(); });
+  msgInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+  sendBtn.addEventListener('click', sendMessage);
+
+  loadAgents();
+  connect();
+})();
+</script>
+</body>
+</html>

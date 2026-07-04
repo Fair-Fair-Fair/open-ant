@@ -183,12 +183,19 @@ class DispatchResultEvent(Event):
     error: str | None = None
 
 
+@dataclass
+class StreamChunkEvent(Event):
+    """Event for streaming a token chunk to the client."""
+    pass
+
+
 # Registry mapping event class names to event classes
 _EVENT_CLASSES: dict[str, type[Event]] = {
     "InboundEvent": InboundEvent,
     "OutboundEvent": OutboundEvent,
     "DispatchEvent": DispatchEvent,
     "DispatchResultEvent": DispatchResultEvent,
+    "StreamChunkEvent": StreamChunkEvent,
 }
 
 

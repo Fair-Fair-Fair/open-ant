@@ -16,7 +16,7 @@ from .worker import SubscribeWorker  # 基类：提供事件订阅型 Worker 的
 from ant.core.agent import Agent  # Agent 核心类，封装 LLM 对话逻辑
 from ant.core.events import (
     InboundEvent, OutboundEvent, AgentEventSource,
-    DispatchEvent, DispatchResultEvent, # 入站/出站事件数据模型
+    DispatchEvent, DispatchResultEvent, StreamChunkEvent,
 )
 
 from ant.utils.def_loader import DefNotFoundError  # Agent/Skill 定义加载失败的异常
@@ -99,8 +99,8 @@ class AgentWorker(SubscribeWorker):
         核心执行逻辑：
           1. 创建 Agent 实例并恢复/新建会话
           2. 判断是否为斜杠命令，如果是则走命令分发流程
-          3. 否则调用 session.chat() 执行 LLM 对话
-          4. 将结果封装为 OutboundEvent 发布到事件总线
+          3. 否则调用 session.stream_chat() 执行流式 LLM 对话
+          4. 将结果通过 StreamChunkEvent + OutboundEvent 发布到事件总线
           5. 异常时进行重试（最多 MAX_RETRIES 次），超限后返回错误
 
         Args:
@@ -141,12 +141,35 @@ class AgentWorker(SubscribeWorker):
                         return
                     # 如果命令未匹配（result 为空），则继续走 Agent 对话流程
 
-                # ── 执行 Agent 对话 ──
-                # 将用户消息发送给 Agent，Agent 内部会调用 LLM 并处理工具调用
-                response = await session.chat(event.content)
+                collected_content = ""
+                async for chunk in session.stream_chat(event.content):
+                    chunk_type = chunk.get("type")
+
+                    if chunk_type == "token":
+                        token = chunk["data"]
+                        collected_content += token
+                        await self._emit_stream_chunk(
+                            event, token, agent_def.id
+                        )
+
+                    elif chunk_type == "status":
+                        logger.info(f"Stream status: {chunk['data']}")
+
+                    elif chunk_type == "tool_result":
+                        logger.debug(f"Tool result: {chunk['data'].get('name')}")
+
+                    elif chunk_type == "done":
+                        break
+
+                    elif chunk_type == "error":
+                        await self._emit_response(
+                            event, "", agent_def.id, str(chunk.get("data", "Unknown error"))
+                        )
+                        return
+
                 logger.info(f"Session completed: {session_id}")
 
-                await self._emit_response(event, response, agent_def.id)
+                await self._emit_response(event, collected_content, agent_def.id)
             except Exception as e:
                 # ── 异常处理与重试机制 ──
                 logger.error(f"Session failed: {e}")
@@ -156,8 +179,8 @@ class AgentWorker(SubscribeWorker):
                     # 使用 dataclasses.replace() 创建新事件（dataclass 不可变，不能直接修改字段）
                     retry_event = replace(
                         event,
-                        retry_count=event.retry_count + 1,  # 递增重试计数
-                        content=".",  # 重试时使用最小化消息内容，避免重复发送原始用户消息
+                        retry_count=event.retry_count + 1,
+                        content=".",
                     )
                     # 将重试事件发布回事件总线，AgentWorker 会再次收到并处理
                     await self.context.eventbus.publish(retry_event)
@@ -166,6 +189,20 @@ class AgentWorker(SubscribeWorker):
                     await self._emit_response(event, "", agent_def.id, str(e))
 
         self._maybe_cleanup_semaphores(agent_def)
+
+    async def _emit_stream_chunk(
+        self,
+        event: ProcessableEvent,
+        content: str,
+        agent_id: str,
+    ) -> None:
+        """Emit a streaming chunk event."""
+        stream_event = StreamChunkEvent(
+            session_id=event.session_id,
+            source=AgentEventSource(agent_id),
+            content=content,
+        )
+        await self.context.eventbus.publish(stream_event)
 
     async def _emit_response(self,
                              event: ProcessableEvent,

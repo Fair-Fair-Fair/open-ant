@@ -21,10 +21,14 @@ from ant.tools.post_message_tool import create_post_message_tool
 from ant.tools.subagent_tool import create_subagent_dispatch_tool
 # 17 document ingestion
 from ant.tools.doc_ingest_tool import ingest_document
+# 18 knowledge search
+from ant.tools.retriever_knowledge_tool import retriever_knowledge
 from litellm.types.completion import (
     ChatCompletionMessageParam as Message,
     ChatCompletionMessageToolCallParam,
 )
+# stream output support
+from typing import AsyncGenerator, Dict, Any, Union
 
 if TYPE_CHECKING:
     from ant.core.context import SharedContext
@@ -61,6 +65,7 @@ class Agent:
         # Register document ingest tool if memory is enabled
         if self.context.doc_ingester is not None:
             registry.register(ingest_document)
+            registry.register(retriever_knowledge)
 
         if include_post_message:
             post_message_tool = create_post_message_tool(self.context)
@@ -259,18 +264,44 @@ class AgentSession:
         if not retriever:
             return
 
-        last_user_msg = self.state.messages[-1].get("content", "") if self.state.messages else ""
-        if not last_user_msg:
+        query = self._build_retrieval_query()
+        if not query:
             return
 
         logger = logging.getLogger(__name__)
         try:
-            memories = await retriever.retrieve(last_user_msg)
+            memories = await retriever.retrieve(query)
             if memories:
                 self.state.memory_context = retriever.format_for_prompt(memories)
                 logger.debug(f"Retrieved {len(memories)} memories for session {self.session_id}")
         except Exception as e:
             logger.debug(f"Memory retrieval failed: {e}")
+
+    def _build_retrieval_query(self) -> str:
+        """Build a context-aware retrieval query from recent conversation turns.
+
+        Instead of using only the last user message, this collects recent
+        user messages to preserve conversational context and avoid
+        semantic drift in multi-turn dialogs.
+        """
+        user_messages = []
+        for msg in reversed(self.state.messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if content:
+                    user_messages.append(content)
+            if len(user_messages) >= 3:
+                break
+
+        if not user_messages:
+            return ""
+
+        user_messages.reverse()
+
+        if len(user_messages) == 1:
+            return user_messages[0]
+
+        return " ".join(user_messages)
 
     async def _maybe_extract_memories(self) -> None:
         """Extract and store memories if conditions are met."""
@@ -394,3 +425,75 @@ class AgentSession:
             result = f"Error executing tool: {e}"
 
         return result
+
+    async def stream_chat(self, message: str) -> AsyncGenerator[Dict[str, Any], None]:
+        """流式对话，产生事件：'token', 'tool_calls', 'status', 'tool_result', 'done', 'error'"""
+        user_msg: Message = {"role": "user", "content": message}
+        self.state.add_message(user_msg)
+        await self._retrieve_memories()
+
+        tool_schemas = self.tools.get_tool_schemas()
+        logger = logging.getLogger(__name__)
+
+        while True:
+            messages = self.state.build_messages()
+            self.state = await self.context_guard.check_and_compact(self.state)
+
+            # 这里调用 LLMProvider.stream_chat
+            async for chunk in self.agent.llm.stream_chat(messages, tool_schemas):
+                event_type = chunk.get("type")
+
+                if event_type == "token":
+                    yield {"type": "token", "data": chunk["data"]}
+
+                elif event_type == "tool_calls":
+                    tool_calls = chunk["data"]  # list[LLMToolCall]
+                    # 可以发送一个状态，告知前端即将执行工具
+                    yield {"type": "status", "data": f"正在执行 {len(tool_calls)} 个工具..."}
+
+                    # 执行所有工具
+                    tool_results = []
+                    for tc in tool_calls:
+                        result = await self._execute_tool_call(tc)
+                        tool_results.append(result)
+                        # 单个工具完成结果
+                        yield {"type": "tool_result", "data": {"name": tc.name, "result": result}}
+
+                    # 将 assistant 消息（含 tool_calls）和 tool 结果加入 state
+                    assistant_msg: Message = {
+                        "role": "assistant",
+                        "content": "",  # 首轮可能无文本，但有时也有文本 + tool_calls，视情况而定
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {"name": tc.name, "arguments": tc.arguments}
+                            }
+                            for tc in tool_calls
+                        ]
+                    }
+                    self.state.add_message(assistant_msg)
+                    for tc, result in zip(tool_calls, tool_results):
+                        self.state.add_message({
+                            "role": "tool",
+                            "content": result,
+                            "tool_call_id": tc.id
+                        })
+
+                    # 工具执行完毕，继续循环（让 LLM 基于工具结果再次生成）
+                    break  # 跳出 for，继续 while
+
+                elif event_type == "done":
+                    # 生成结束
+                    yield {"type": "done", "finish_reason": chunk.get("finish_reason", "stop")}
+                    return  # 直接结束生成器
+
+                elif event_type == "error":
+                    yield {"type": "error", "data": chunk["data"]}
+                    return
+
+            else:
+                # 如果 for 循环正常结束（没有 break），说明没有 tool_calls 也没有 done，但正常情况会有 done
+                # 这里可以认为结束了
+                yield {"type": "done", "finish_reason": "stop"}
+                break

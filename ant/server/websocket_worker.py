@@ -11,7 +11,7 @@ from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError, BaseModel, Field
 
 from .worker import SubscribeWorker
-from ant.core.events import EventSource, Event, InboundEvent, OutboundEvent, WebSocketEventSource
+from ant.core.events import EventSource, Event, InboundEvent, OutboundEvent, StreamChunkEvent, WebSocketEventSource
 from ant.utils.config import SourceSessionConfig
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ class WebSocketWorker(SubscribeWorker):
         self.clients: Set[WebSocket] = set()
 
         # Auto-subscribe to event classes
-        for event_class in [InboundEvent, OutboundEvent]:
+        for event_class in [InboundEvent, OutboundEvent, StreamChunkEvent]:
             self.context.eventbus.subscribe(event_class, self.handle_event)
         self.logger.info("WebSocketWorker subscribed to event types")
 
