@@ -14,8 +14,8 @@
 
 ---
 ![](./images/OPENANT.png)
-![前端界面展示](./images/front.png)
-> 📖 此仓库是 [build-your-own-openclaw](https://github.com/czl9707/build-your-own-openclaw) 的后续实现，我们计划加入 RAG、MCP、Java 生态通信等新功能。
+![前端界面展示](./images/rag.png)
+> 📖 此仓库是 [build-your-own-openclaw](https://github.com/czl9707/build-your-own-openclaw) 的后续实现，我们计划加入 RAG(已完成)、MCP、Java 生态通信等新功能。
 > 在阅读本仓库之前，您应当具有 LangChain 和 LangGraph 等 Agent 相关知识，或者跟随 build-your-own-openclaw 学习了如何开发 Agent 运行时框架。
 
 ## 🐜 Why Open-Ant?
@@ -121,25 +121,26 @@ LiteLLM · Search · MCP · RAG
 
 # 🚀 Project Status
 
-| Module | Status |
-|---------|:------:|
-| 📡 EventBus | ✅ |
-| ⚡ Worker Runtime | ✅ |
-| 🤖 Agent Runtime | ✅ |
-| 🔀 Routing Engine | ✅ |
-| 🛠 Tool Registry | ✅ |
-| 🧠 Prompt Builder | ✅ |
-| 🧠 Context Guard | ✅ |
-| 🌐 Multi Channel | ✅ |
-| ⚙ Config Hot Reload | ✅ |
-| ⏰ Cron Scheduler | ✅ |
-| 📖 Conversation History | ✅ |
-| 🧠 RAG Memory | 🚧 |
-| 🔌 MCP Protocol | 🚧 |
-| ⚡ gRPC Service | 🚧 |
-| 🟥 Redis Backend | 🚧 |
-| 📊 OpenTelemetry | 🚧 |
-| ☁ Distributed EventBus | 🚧 |
+| Module                  | Status |
+|-------------------------|:------:|
+| 📡 EventBus             |   ✅    |
+| ⚡ Worker Runtime        |   ✅    |
+| 🤖 Agent Runtime        |   ✅    |
+| 🔀 Routing Engine       |   ✅    |
+| 🛠 Tool Registry        |   ✅    |
+| 🧠 Prompt Builder       |   ✅    |
+| 🧠 Context Guard        |   ✅    |
+| 🌐 Multi Channel        |   ✅    |
+| ⚙ Config Hot Reload     |   ✅    |
+| ⏰ Cron Scheduler        |   ✅    |
+| 📖 Conversation History |   ✅    |
+| 🧠 RAG Memory           |   ✅    |
+| 🌐 Web UI               |   ✅    |
+| 🔌 MCP Protocol         |   🚧   |
+| ⚡ gRPC Service          |   🚧   |
+| 🟥 Redis Backend        |   🚧   |
+| 📊 OpenTelemetry        |   🚧   |
+| ☁ Distributed EventBus  |   🚧   |
 
 ---
 
@@ -255,40 +256,7 @@ LLM Summary
 
 # 🛣 Roadmap
 
-## 🧠 Phase 1 · RAG Memory
-
-> Long-term Semantic Memory
-
-```
-Conversation
-      │
-      ▼
-Memory Guard
-      │
-      ▼
-Embedding
-      │
-      ▼
-Vector Store
-      │
-      ▼
-Similarity Search
-      │
-      ▼
-Prompt Injection
-```
-
-**目标**
-
-- ✅ 自动事实提取
-- ✅ Embedding
-- ✅ Vector Search
-- ✅ Prompt Injection
-- ✅ Long-term Memory
-
----
-
-## 🔌 Phase 2 · MCP Native
+## 🔌 Phase 1 · MCP Native
 
 支持：
 
@@ -299,7 +267,7 @@ Prompt Injection
 
 ---
 
-## ⚡ Phase 3 · gRPC Microservice
+## ⚡ Phase 2 · gRPC Microservice
 
 Open-Ant 将作为独立 AI Runtime 部署。
 
@@ -311,7 +279,7 @@ ChatResponse response = stub.chat(request);
 
 ---
 
-## 🟥 Phase 4 · Redis Infrastructure
+## 🟥 Phase 3 · Redis Infrastructure
 
 统一迁移：
 
@@ -324,7 +292,7 @@ ChatResponse response = stub.chat(request);
 
 ---
 
-## 📊 Phase 5 · Observability
+## 📊 Phase 4 · Observability
 
 支持：
 
@@ -336,7 +304,7 @@ ChatResponse response = stub.chat(request);
 
 ---
 
-## ☁ Phase 6 · Distributed EventBus
+## ☁ Phase 5 · Distributed EventBus
 
 将 EventBus 升级为：
 
@@ -351,7 +319,7 @@ ChatResponse response = stub.chat(request);
 
 ---
 
-## 🌌 Phase 7 · Workflow Runtime
+## 🌌 Phase 6 · Workflow Runtime
 
 支持 DAG Workflow：
 
