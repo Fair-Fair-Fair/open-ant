@@ -164,6 +164,50 @@ class SandboxConfig(BaseModel):
     network: NetworkSandboxConfig = Field(default_factory=NetworkSandboxConfig)
 
 
+# ── Guardrail configuration ──────────────────────────────────────────────
+
+
+class InputGuardrailConfig(BaseModel):
+    """Input validation and prompt injection protection."""
+
+    enabled: bool = True
+    max_message_length: int = Field(default=10_000, ge=0)
+    """Max characters in a single user message. 0 = unlimited."""
+    sanitize_control_chars: bool = True
+    """Strip ASCII control characters (except \\n, \\r, \\t) from user input."""
+    detect_injection: bool = True
+    """Scan for prompt injection patterns in user messages."""
+    block_injection: bool = True
+    """When True, matching messages are blocked. When False, only logged (audit mode)."""
+    blocked_patterns: list[str] | None = None
+    """Custom regex patterns for injection detection. None = use built-in defaults."""
+
+
+class OutputGuardrailConfig(BaseModel):
+    """Output sanitization and content policy enforcement."""
+
+    enabled: bool = True
+    redact_secrets: bool = True
+    """Scan and redact API keys, tokens, private keys from agent responses."""
+    max_output_length: int = Field(default=100_000, ge=0)
+    """Max characters in agent response. 0 = unlimited."""
+    detect_tool_injection: bool = True
+    """Scan tool results for prompt injection before they enter LLM context."""
+    redact_patterns: list[str] | None = None
+    """Custom regex patterns for secret redaction. None = use built-in defaults."""
+    blocked_patterns: list[str] | None = None
+    """Content policy patterns — responses matching these are replaced with a block message."""
+
+
+class GuardrailConfig(BaseModel):
+    """Top-level guardrail configuration. Master switch controls all."""
+
+    enabled: bool = True
+    """Master switch — when False ALL guardrail checks are bypassed."""
+    input: InputGuardrailConfig = Field(default_factory=InputGuardrailConfig)
+    output: OutputGuardrailConfig = Field(default_factory=OutputGuardrailConfig)
+
+
 class Config(BaseModel):
     """Main configuration for step 00."""
 
@@ -197,6 +241,9 @@ class Config(BaseModel):
 
     # sandbox — harness security boundary
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+
+    # guardrails — input/output content safety layer
+    guardrails: GuardrailConfig = Field(default_factory=GuardrailConfig)
 
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":

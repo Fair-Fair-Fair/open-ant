@@ -238,6 +238,12 @@ class AgentWorker(SubscribeWorker):
             content: 响应正文内容（正常结果或空字符串）
             error: 可选的错误信息，非 None 时会转为字符串写入出站事件的 error 字段
         """
+        # When content is empty but error is present, put the error into
+        # content so that DeliveryWorker actually delivers it to the frontend.
+        # (DeliveryWorker reads event.content, not event.error.)
+        if not content and error:
+            content = error
+
         if isinstance(event, DispatchEvent):
             result_event: OutboundEvent | DispatchResultEvent = DispatchResultEvent(
                 session_id=event.session_id,

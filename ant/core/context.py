@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 from ant.core.routing import RoutingTable
 
 from ant.core.sandbox import Sandbox
+from ant.core.guardrails import Guardrails
 
 # 12-cron-heartbeat
 from ant.core.cron_loader import CronLoader
@@ -66,6 +67,9 @@ class SharedContext:
     # 17 rag-document-ingestion
     doc_ingester: 'DocumentIngester | None'
 
+    # harness: input/output guardrails
+    guardrails: Guardrails
+
     def __init__(self, config: Config,
                  channels: list[Channel[Any]] | None = None) -> None:
         self.config = config
@@ -89,6 +93,9 @@ class SharedContext:
 
         # harness: security sandbox
         self.sandbox = Sandbox(config.sandbox, config.workspace)
+
+        # harness: input/output guardrails
+        self.guardrails = Guardrails(config.guardrails)
 
         # 16 rag-memory
         self._init_memory(config)

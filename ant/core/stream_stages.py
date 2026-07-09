@@ -64,7 +64,7 @@ class StreamValidationStage(StreamPipelineStage):
             _finish_span(span, "ok")
             yield {
                 "type": "error",
-                "message": (
+                "data": (
                     f"Agent reached the maximum tool-call iteration limit "
                     f"({ctx.max_iterations}). Your request may be too complex, "
                     f"or the agent got stuck trying to work around a restriction. "
@@ -72,6 +72,57 @@ class StreamValidationStage(StreamPipelineStage):
                 ),
             }
             return
+
+        _finish_span(span, "ok")
+        async for event in next(ctx):
+            yield event
+
+
+class StreamInputGuardStage(StreamPipelineStage):
+    """Validate and sanitize user input before it reaches the LLM context.
+
+    Three layers (in order):
+      1. Sanitize control characters
+      2. Check message length
+      3. Detect prompt injection patterns
+
+    Short-circuits with an error event on violation — the pipeline never
+    reaches the LLM for a malicious or malformed message.
+    """
+
+    async def execute(self, ctx, next):
+        span = _start_span(ctx, "InputGuardStage")
+        guardrails = ctx.session.shared_context.guardrails
+
+        if guardrails and guardrails.input:
+            input_guard = guardrails.input
+
+            # 1. Sanitize control characters
+            original = ctx.user_message
+            ctx.user_message = input_guard.sanitize(original)
+            if span and original != ctx.user_message:
+                span.add_event("control_chars_stripped", {
+                    "original_len": len(original),
+                    "sanitized_len": len(ctx.user_message),
+                })
+
+            # 2. Check message length
+            ok, msg = input_guard.check_length(ctx.user_message)
+            if not ok:
+                if span:
+                    span.add_event("length_blocked", {"message": msg})
+                _finish_span(span, "ok")
+                yield {"type": "error", "data": msg}
+                return
+
+            # 3. Detect prompt injection
+            clean, pattern, msg = input_guard.detect_injection(ctx.user_message)
+            if not clean:
+                if span:
+                    span.add_event("injection_blocked", {"pattern": pattern})
+                _finish_span(span, "ok")
+                yield {"type": "error", "data": msg}
+                return
 
         _finish_span(span, "ok")
         async for event in next(ctx):
@@ -242,6 +293,13 @@ class StreamToolExecutionStage(StreamPipelineStage):
                 }
 
                 result = await ctx.session._execute_tool_call(tc)
+
+                # ── Tool result injection scan ──
+                guardrails = ctx.session.shared_context.guardrails
+                if guardrails and guardrails.output:
+                    result = guardrails.output.scan_tool_result(result)
+                # ──────────────────────────────────
+
                 tool_results.append(result)
 
                 if tool_span:
@@ -295,6 +353,64 @@ class StreamToolExecutionStage(StreamPipelineStage):
                 _finish_span(span, "ok")
 
         # Chain to terminal stage
+        async for event in next(ctx):
+            yield event
+
+
+class StreamOutputGuardStage(StreamPipelineStage):
+    """Sanitize agent output before it is persisted to session history.
+
+    Operates on ``ctx.response_content`` after the LLM and any tool calls
+    have completed, but **before** TerminalStage persists the response.
+
+    Three layers:
+      1. Redact secrets (API keys, tokens, private keys)
+      2. Check output length (truncate if needed)
+      3. Check content policy (replace blocked content)
+    """
+
+    async def execute(self, ctx, next):
+        span = _start_span(ctx, "OutputGuardStage")
+        guardrails = ctx.session.shared_context.guardrails
+
+        # Pre-work: sanitize ctx.response_content before TerminalStage persists it
+        if (
+            guardrails
+            and guardrails.output
+            and ctx.stop_reason != "tool_calls"
+            and ctx.response_content.strip()
+        ):
+            output_guard = guardrails.output
+
+            # 1. Redact secrets
+            original_len = len(ctx.response_content)
+            ctx.response_content = output_guard.redact_secrets(ctx.response_content)
+            if span and len(ctx.response_content) != original_len:
+                span.add_event("secrets_redacted", {})
+
+            # 2. Check / enforce output length
+            ok, msg = output_guard.check_length(ctx.response_content)
+            if not ok:
+                max_len = output_guard._max_length
+                ctx.response_content = (
+                    ctx.response_content[:max_len]
+                    + f"\n\n[Truncated at {max_len:,} chars]"
+                )
+                if span:
+                    span.add_event("length_truncated", {"max_length": max_len})
+
+            # 3. Check content policy
+            clean, pattern, msg = output_guard.check_policy(ctx.response_content)
+            if not clean:
+                ctx.response_content = (
+                    f"[Response blocked by content policy: {msg}]"
+                )
+                if span:
+                    span.add_event("content_blocked", {"pattern": pattern})
+
+        _finish_span(span, "ok")
+
+        # Chain to TerminalStage (which persists the sanitized content)
         async for event in next(ctx):
             yield event
 

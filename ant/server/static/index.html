@@ -961,14 +961,28 @@ body::after {
 
       if (data.type === 'OutboundEvent') {
         hideTyping();
-        finalizeStream(data.content);
+        if (data.content) {
+          if (streamingBubble) {
+            // Normal path: stream tokens arrived first, update the bubble
+            streamingBubble.textContent = data.content;
+          } else {
+            // Fallback: no stream tokens (e.g. guardrail blocked before LLM call)
+            // Show the content as a regular agent message instead of dropping it
+            if (data.error) {
+              appendMessage('agent', '⚠️ ' + data.content);
+            } else {
+              appendMessage('agent', data.content);
+            }
+          }
+        }
+        streamingBubble = null;
         statusText.textContent = '在线';
       }
 
       if (data.type === 'error') {
         hideTyping();
         finalizeStream('');
-        appendMessage('agent', `⚠️ ${data.message || '发生错误'}`);
+        appendMessage('agent', '⚠️ ' + (data.message || '发生错误'));
       }
     };
   }

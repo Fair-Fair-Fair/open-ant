@@ -12,9 +12,9 @@ from ant.core.session_state import SessionState
 from ant.core.events import EventSource
 from ant.core.stream_pipeline import StreamPipeline, PipelineContext
 from ant.core.stream_stages import (
-    StreamValidationStage, StreamObservabilityStage, StreamContextBuildStage,
-    StreamContextGuardStage, StreamLLMCallStage, StreamToolExecutionStage,
-    StreamTerminalStage,
+    StreamValidationStage, StreamInputGuardStage, StreamObservabilityStage,
+    StreamContextBuildStage, StreamContextGuardStage, StreamLLMCallStage,
+    StreamToolExecutionStage, StreamOutputGuardStage, StreamTerminalStage,
 )
 from ant.core.tracer import ExecutionTracer
 from ant.provider.llm import LLMProvider
@@ -257,11 +257,13 @@ class AgentSession:
 
         pipeline = StreamPipeline()
         pipeline.add_stage(StreamValidationStage())
+        pipeline.add_stage(StreamInputGuardStage())
         pipeline.add_stage(StreamObservabilityStage())
         pipeline.add_stage(StreamContextBuildStage())
         pipeline.add_stage(StreamContextGuardStage())
         pipeline.add_stage(StreamLLMCallStage())
         pipeline.add_stage(StreamToolExecutionStage())
+        pipeline.add_stage(StreamOutputGuardStage())
         pipeline.add_stage(StreamTerminalStage())
 
         ctx = PipelineContext(
