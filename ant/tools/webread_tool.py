@@ -36,6 +36,7 @@ def create_webread_tool(config: "Config") -> BaseTool | None:
     )
     async def webread(url: str, session: "AgentSession") -> str:
         """Read a web page and return markdown content."""
+        session.shared_context.sandbox.network.validate_url(url)
 
         result = await provider.read(url)
 

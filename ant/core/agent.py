@@ -54,7 +54,17 @@ class Agent:
 
     def _build_tools(self, include_post_message: bool) -> ToolRegistry:
         """Build a ToolRegistry with tools appropriate for the session."""
-        registry = ToolRegistry.with_builtins()
+        # Build ToolGovernance if a tool_policy is configured on this agent.
+        # Lazy import to avoid circular dependency: agent.py → registry →
+        # sandbox → core.__init__ → agent.py.
+        from ant.tools.policy import ToolPolicy, ToolGovernance
+
+        governance: ToolGovernance | None = None
+        if self.agent_def.tool_policy:
+            policy = ToolPolicy(**self.agent_def.tool_policy)
+            governance = ToolGovernance(policy)
+
+        registry = ToolRegistry.with_builtins(governance=governance)
 
         # Register skill tool if allowed
         if self.agent_def.allow_skills:

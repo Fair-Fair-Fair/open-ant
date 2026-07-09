@@ -24,6 +24,7 @@ class AgentDef(BaseModel):
     llm: LLMConfig
     allow_skills: bool = False
     max_concurrency: int = Field(default=1, ge=1)
+    tool_policy: dict[str, Any] | None = None
 
 
 class AgentLoader:
@@ -80,6 +81,7 @@ class AgentLoader:
                 soul_md=soul_md,
                 llm=merged_llm,
                 allow_skills=frontmatter.get("allow_skills", False),
+                tool_policy=frontmatter.get("tool_policy"),
             )
         except ValidationError as e:
             raise InvalidDefError("agent", def_id, str(e))

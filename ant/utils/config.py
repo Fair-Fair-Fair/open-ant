@@ -107,6 +107,63 @@ class ApiConfig(BaseModel):
     port: int = Field(default=8000, gt=0, lt=65536)
 
 
+# ── Sandbox configuration ───────────────────────────────────────────────
+
+
+class PathSandboxConfig(BaseModel):
+    """Filesystem access restrictions for the agent sandbox."""
+
+    enabled: bool = True
+    allowed_dirs: list[str] = Field(default_factory=list)
+    """Extra directories (relative to workspace or absolute) allowed for
+    read/write.  The workspace itself is always allowed."""
+    blocked_patterns: list[str] | None = None
+    """Glob patterns to block even inside allowed dirs.
+    ``None`` = use built-in defaults (config files, .history/, .memory/, etc.)."""
+    allow_all: bool = False
+    """If True, disable path sandbox entirely (opt-in override)."""
+
+
+class CommandSandboxConfig(BaseModel):
+    """Shell command execution restrictions for the agent sandbox."""
+
+    enabled: bool = True
+    default_timeout: int = Field(default=30, ge=1, le=300)
+    """Max seconds a command may run before being killed."""
+    max_output_size: int = Field(default=100_000, ge=1_000)
+    """Max characters returned from stdout+stderr combined."""
+    blocked_patterns: list[str] | None = None
+    """Regex patterns that block command execution. ``None`` = use built-in defaults."""
+    allowed_patterns: list[str] = Field(default_factory=list)
+    """Explicit allowlist overrides — these commands always pass regardless of blocked_patterns."""
+    working_dir: str | None = None
+    """Restrict command working directory. ``None`` = workspace root."""
+
+
+class NetworkSandboxConfig(BaseModel):
+    """Outbound HTTP(S) restrictions for the agent sandbox."""
+
+    enabled: bool = True
+    block_private_ips: bool = True
+    """Block requests to 10.x, 192.168.x, 172.16-31.x, 127.x, ::1."""
+    block_file_urls: bool = True
+    """Block ``file://`` scheme requests."""
+    allowed_domains: list[str] = Field(default_factory=list)
+    """If non-empty, *only* these domains (and subdomains via ``*.example.com``) are allowed."""
+    denied_domains: list[str] = Field(default_factory=list)
+    """Domains always blocked, regardless of allowed_domains."""
+
+
+class SandboxConfig(BaseModel):
+    """Top-level sandbox configuration.  All sub-sandboxes default to safe values."""
+
+    enabled: bool = True
+    """Master switch — when ``False`` ALL sandbox checks are bypassed."""
+    path: PathSandboxConfig = Field(default_factory=PathSandboxConfig)
+    command: CommandSandboxConfig = Field(default_factory=CommandSandboxConfig)
+    network: NetworkSandboxConfig = Field(default_factory=NetworkSandboxConfig)
+
+
 class Config(BaseModel):
     """Main configuration for step 00."""
 
@@ -137,6 +194,9 @@ class Config(BaseModel):
 
     # 16-rag-memory
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+
+    # sandbox — harness security boundary
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":

@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 from ant.core.routing import RoutingTable
 
+from ant.core.sandbox import Sandbox
+
 # 12-cron-heartbeat
 from ant.core.cron_loader import CronLoader
 
@@ -84,6 +86,9 @@ class SharedContext:
 
         self.cron_loader = CronLoader.from_config(config)
         self.prompt_builder = PromptBuilder(self)
+
+        # harness: security sandbox
+        self.sandbox = Sandbox(config.sandbox, config.workspace)
 
         # 16 rag-memory
         self._init_memory(config)

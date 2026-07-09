@@ -8,6 +8,7 @@ from ant.tools.policy import ToolGovernance
 
 if TYPE_CHECKING:
     from ant.core.agent import AgentSession
+    from ant.core.sandbox import SandboxViolation
 
 
 class ToolRegistry:
@@ -35,6 +36,10 @@ class ToolRegistry:
     async def execute_tool(
             self, name: str, session: "AgentSession", **kwargs: Any
     ) -> str:
+        # Lazy import to avoid circular dependency:
+        #   registry → sandbox → core.__init__ → agent → registry
+        from ant.core.sandbox import SandboxViolation  # noqa: F811
+
         tool = self.get(name)
         if tool is None:
             raise ValueError(f"tool not found name: {name}")
@@ -51,6 +56,11 @@ class ToolRegistry:
             if self._governance:
                 self._governance.record_call(name, kwargs, result, elapsed)
             return result
+        except SandboxViolation as e:
+            elapsed = time.time() - start
+            if self._governance:
+                self._governance.record_call(name, kwargs, str(e), elapsed)
+            return f"Safety violation ({e.violation_type}): {e}"
         except Exception as e:
             elapsed = time.time() - start
             if self._governance:
@@ -58,9 +68,9 @@ class ToolRegistry:
             raise
 
     @classmethod
-    def with_builtins(cls) -> "ToolRegistry":
+    def with_builtins(cls, governance: ToolGovernance | None = None) -> "ToolRegistry":
         """Created a ToolRegistry with builtin tools already registered"""
-        registry = cls()
+        registry = cls(governance=governance)
         registry.register(read_file)
         registry.register(write_file)
         registry.register(edit_file)

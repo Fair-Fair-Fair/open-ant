@@ -23,6 +23,7 @@ if TYPE_CHECKING:
       })
 async def read_file(path: str, session: "AgentSession") -> str:
     """Read and return the contents of a file at the given path."""
+    session.shared_context.sandbox.path.validate_read(path)
     try:
         return Path(path).read_text()
     except FileNotFoundError:
@@ -53,6 +54,7 @@ async def read_file(path: str, session: "AgentSession") -> str:
       })
 async def write_file(path: str, content: str, session: "AgentSession") -> str:
     """Write content to a file at the given path."""
+    session.shared_context.sandbox.path.validate_write(path)
     try:
         Path(path).write_text(content)
         return f"Successfully wrote to: {path}"
@@ -86,6 +88,7 @@ async def write_file(path: str, content: str, session: "AgentSession") -> str:
       })
 async def edit_file(path: str, old_string: str, new_string: str, session: "AgentSession") -> str:
     """Edit a file by replacing a string with new content."""
+    session.shared_context.sandbox.path.validate_write(path)
     try:
         content = Path(path).read_text()
         if old_string not in content:
@@ -115,17 +118,29 @@ async def edit_file(path: str, old_string: str, new_string: str, session: "Agent
       })
 async def bash(command: str, session: "AgentSession") -> str:
     """Execute a bash command and return the output."""
+    sb = session.shared_context.sandbox.command
+    sb.validate_command(command)
+
     try:
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
+            cwd=sb.working_dir,
         )
-        stdout, stderr = await process.communicate()
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=sb.timeout
+        )
         output = stdout.decode() if stdout else ""
         error = stderr.decode() if stderr else ""
+
+        output = sb.validate_output(output)
+        error = sb.validate_output(error)
+
         if output and error:
             return f"{output}\n{error}"
         return output or error or "Command completed with no output"
+    except asyncio.TimeoutError:
+        return f"Error: Command timed out after {sb.timeout} seconds"
     except Exception as e:
         return f"Error executing command: {e}"

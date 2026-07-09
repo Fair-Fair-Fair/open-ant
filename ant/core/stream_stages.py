@@ -62,7 +62,15 @@ class StreamValidationStage(StreamPipelineStage):
             if span:
                 span.add_event("max_iterations_reached", {"iteration": ctx.iteration})
             _finish_span(span, "ok")
-            yield {"type": "done", "finish_reason": "stop"}
+            yield {
+                "type": "error",
+                "message": (
+                    f"Agent reached the maximum tool-call iteration limit "
+                    f"({ctx.max_iterations}). Your request may be too complex, "
+                    f"or the agent got stuck trying to work around a restriction. "
+                    f"Try a more specific request or check the sandbox settings."
+                ),
+            }
             return
 
         _finish_span(span, "ok")

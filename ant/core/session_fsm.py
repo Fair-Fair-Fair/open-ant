@@ -24,6 +24,7 @@ TRANSITIONS: dict[SessionPhase, set[SessionPhase]] = {
         SessionPhase.COMPACTING,
         SessionPhase.COMPLETED,
         SessionPhase.FAILED,
+        SessionPhase.EXHAUSTED,
     },
     SessionPhase.WAITING_TOOL: {SessionPhase.ACTIVE},
     SessionPhase.WAITING_INPUT: {SessionPhase.ACTIVE},

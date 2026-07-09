@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 )
 async def ingest_document(path: str, session: "AgentSession") -> str:
     """Ingest a file or directory into the vector store."""
+    session.shared_context.sandbox.path.validate_ingest(path)
+
     ctx = session.shared_context
     ingester = getattr(ctx, "doc_ingester", None)
 
