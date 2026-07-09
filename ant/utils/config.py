@@ -234,8 +234,19 @@ class Config(BaseModel):
         self._set_config_value(self.workspace / "config.user.yaml", key, value)
 
     def set_runtime(self, key: str, value: Any) -> None:
-        """Set a config value for the runtime config file"""
+        """Set a config value for the runtime config file.
+
+        Also updates the in-memory Config object immediately so API lookups
+        (e.g. source→session_id) take effect without a server restart.
+        """
         self._set_config_value(self.workspace / "config.runtime.yaml", key, value)
+
+        # Keep in-memory state in sync — split by dots, update the right field
+        keys = key.split(".")
+        if keys[0] == "sources" and len(keys) == 2:
+            if not isinstance(value, SourceSessionConfig):
+                value = SourceSessionConfig(**value) if isinstance(value, dict) else value
+            self.sources[keys[1]] = value
 
     def reload(self) -> bool:
         """Re-load config.user.yaml and merge with runtime"""

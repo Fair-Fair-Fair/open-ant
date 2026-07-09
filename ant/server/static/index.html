@@ -41,11 +41,20 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
   background: linear-gradient(135deg, var(--blue-50) 0%, var(--white) 50%, var(--blue-50) 100%);
   height: 100vh;
+  color: var(--gray-800);
+  overflow: hidden;
+}
+
+/* ===== App layout (sidebar + chat area) ===== */
+.app-layout {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--gray-800);
-  overflow: hidden;
+  width: 100%;
+  height: 100vh;
+  position: relative;
+  z-index: 1;
+  gap: 0;
 }
 
 /* ===== Animated background blobs ===== */
@@ -79,7 +88,7 @@ body::after {
 .chat-container {
   position: relative;
   z-index: 1;
-  width: min(900px, 95vw);
+  width: min(900px, calc(95vw - 260px));
   height: min(700px, 90vh);
   display: flex;
   flex-direction: column;
@@ -87,7 +96,7 @@ body::after {
   backdrop-filter: blur(24px) saturate(1.6);
   -webkit-backdrop-filter: blur(24px) saturate(1.6);
   border: 1px solid rgba(255,255,255,.6);
-  border-radius: var(--radius);
+  border-radius: 0 var(--radius) var(--radius) 0;
   box-shadow: var(--shadow-xl);
   overflow: hidden;
   animation: containerIn .5s ease-out;
@@ -357,19 +366,290 @@ body::after {
 .send-btn:disabled { opacity: .4; cursor: not-allowed; transform: none; box-shadow: none; }
 .send-btn svg { width: 18px; height: 18px; }
 
+/* ===== Collapsible source cards ===== */
+.sources-group {
+  align-self: flex-start;
+  max-width: 85%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 6px 44px;
+  animation: msgIn .35s ease-out;
+}
+.source-card {
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 13px;
+  transition: var(--transition);
+}
+.source-card:hover { border-color: var(--blue-300); }
+.source-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--gray-600);
+}
+.source-card-header:hover { background: var(--gray-100); }
+.source-card-header .icon { font-size: 14px; flex-shrink: 0; }
+.source-card-header .label {
+  font-weight: 600;
+  color: var(--gray-700);
+  white-space: nowrap;
+}
+.source-card-header .preview {
+  flex: 1;
+  color: var(--gray-400);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.source-card-header .arrow {
+  transition: transform .2s;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--gray-400);
+}
+.source-card.open .source-card-header .arrow { transform: rotate(90deg); }
+.source-card-body {
+  display: none;
+  padding: 0 12px 12px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--gray-600);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+  border-top: 1px solid var(--gray-100);
+}
+.source-card.open .source-card-body { display: block; }
+
+/* ===== Sidebar ===== */
+.sidebar {
+  width: 260px;
+  min-width: 260px;
+  height: min(700px, 90vh);
+  display: flex;
+  flex-direction: column;
+  background: rgba(255,255,255,.65);
+  backdrop-filter: blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  border: 1px solid rgba(255,255,255,.6);
+  border-right: 1px solid rgba(0,0,0,.06);
+  border-radius: var(--radius) 0 0 var(--radius);
+  box-shadow: var(--shadow-xl);
+  overflow: hidden;
+  animation: sidebarIn .5s ease-out;
+}
+@keyframes sidebarIn {
+  from { opacity: 0; transform: translateX(-16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+.sidebar-header {
+  padding: 16px;
+  border-bottom: 1px solid rgba(0,0,0,.06);
+  flex-shrink: 0;
+}
+
+.sidebar-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--gray-700);
+  margin-bottom: 12px;
+  padding-left: 4px;
+}
+
+.new-chat-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px dashed var(--gray-300);
+  border-radius: 10px;
+  background: rgba(255,255,255,.5);
+  color: var(--gray-600);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+  font-family: inherit;
+}
+.new-chat-btn:hover {
+  background: rgba(255,255,255,.8);
+  border-color: var(--blue-400);
+  color: var(--blue-600);
+}
+.new-chat-btn:active { transform: scale(.97); }
+
+/* Session list */
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.session-list::-webkit-scrollbar { width: 4px; }
+.session-list::-webkit-scrollbar-track { background: transparent; }
+.session-list::-webkit-scrollbar-thumb { background: var(--gray-300); border-radius: 10px; }
+
+.session-list-empty {
+  text-align: center;
+  padding: 32px 16px;
+  color: var(--gray-400);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* Session item */
+.session-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: var(--transition);
+  margin-bottom: 2px;
+  position: relative;
+}
+.session-item:hover { background: rgba(0,0,0,.04); }
+.session-item.active { background: rgba(59,130,246,.1); }
+
+.session-item-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+  opacity: .5;
+}
+.session-item.active .session-item-icon { opacity: 1; }
+
+.session-item-info { flex: 1; min-width: 0; }
+.session-item-title {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--gray-700);
+}
+.session-item.active .session-item-title { color: var(--blue-600); }
+.session-item-title.empty { color: var(--gray-400); font-style: italic; }
+
+.session-item-date {
+  font-size: 11px;
+  color: var(--gray-400);
+  margin-top: 2px;
+}
+
+/* Delete button on hover */
+.session-item-del {
+  width: 24px; height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gray-400);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: var(--transition);
+  flex-shrink: 0;
+  font-size: 14px;
+  line-height: 1;
+}
+.session-item:hover .session-item-del { opacity: 1; }
+.session-item-del:hover { background: rgba(239,68,68,.1); color: #ef4444; }
+
+/* Sidebar toggle (hamburger, hidden on desktop) */
+.sidebar-toggle {
+  display: none;
+  position: fixed;
+  top: 12px; left: 12px;
+  z-index: 100;
+  width: 40px; height: 40px;
+  border: none;
+  border-radius: 10px;
+  background: rgba(255,255,255,.85);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  color: var(--gray-600);
+  transition: var(--transition);
+}
+.sidebar-toggle:hover { background: var(--white); color: var(--gray-800); }
+.sidebar-toggle:active { transform: scale(.93); }
+
+/* Sidebar overlay (mobile) */
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.3);
+  z-index: 50;
+  opacity: 0;
+  transition: opacity var(--transition);
+  pointer-events: none;
+}
+.sidebar-overlay.visible { opacity: 1; pointer-events: auto; }
+
 /* ===== Responsive ===== */
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    left: 0; top: 0;
+    z-index: 60;
+    height: 100vh;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    border: none;
+    border-right: 1px solid rgba(0,0,0,.08);
+    transform: translateX(-100%);
+    box-shadow: var(--shadow-xl);
+    transition: transform var(--transition);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .sidebar-overlay { display: block; }
+  .sidebar-toggle { display: flex; }
+  .chat-container { width: 100vw; height: 100vh; border-radius: 0; }
+}
+
 @media (max-width: 640px) {
   .chat-container { width: 100vw; height: 100vh; border-radius: 0; }
   .message { max-width: 90%; }
   .chat-header { padding: 14px 16px; }
   .chat-messages { padding: 16px; }
   .chat-input-area { padding: 12px 16px 16px; }
+  .sidebar-toggle { top: 8px; left: 8px; width: 36px; height: 36px; }
 }
 </style>
 </head>
 <body>
 
-<div class="chat-container">
+<div class="app-layout">
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-title">🐜 Open-Ant</div>
+      <button class="new-chat-btn" id="newChatBtn" title="新对话">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        新对话
+      </button>
+    </div>
+    <div class="session-list" id="sessionList">
+      <div class="session-list-empty">暂无对话</div>
+    </div>
+  </aside>
+
+  <div class="chat-container">
   <!-- Header -->
   <div class="chat-header">
     <div class="logo">🐜</div>
@@ -415,6 +695,14 @@ body::after {
     </div>
   </div>
 </div>
+</div>
+
+<!-- Mobile sidebar overlay -->
+<div class="sidebar-overlay" id="sidebarOverlay"></div>
+<!-- Hamburger toggle (mobile only) -->
+<button class="sidebar-toggle" id="sidebarToggle" title="会话列表">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+</button>
 
 <script>
 (() => {
@@ -430,10 +718,168 @@ body::after {
 
   let ws = null;
   let currentAgentId = '';
-  let userId = 'web-' + Math.random().toString(36).slice(2, 8);
+
+  // ── Session management (localStorage) ──
+  let sessions = loadSessions();
+  let activeUserId = localStorage.getItem('openant_userId') || '';
+
+  // Migration: ensure existing openant_userId is in the sessions array
+  if (activeUserId) {
+    if (!sessions.find(s => s.id === activeUserId)) {
+      sessions.unshift({ id: activeUserId, title: null, updatedAt: Date.now() });
+      saveSessions();
+    }
+  } else {
+    activeUserId = 'web-' + Math.random().toString(36).slice(2, 8);
+    localStorage.setItem('openant_userId', activeUserId);
+    sessions = [{ id: activeUserId, title: null, updatedAt: Date.now() }];
+    saveSessions();
+  }
+  // userId kept for backward compat with existing code — always == activeUserId
+  let userId = activeUserId;
+
   let reconnectTimer = null;
   let reconnectDelay = 1000;
   let streamingBubble = null;
+  let sourceCounter = 0;
+  let sourceCards = {};
+  let currentSourcesGroup = null;
+  let historyLoadSeq = 0;
+
+  // ── Session helpers ──
+  function loadSessions() {
+    try { return JSON.parse(localStorage.getItem('openant_sessions')) || []; } catch { return []; }
+  }
+  function saveSessions() {
+    localStorage.setItem('openant_sessions', JSON.stringify(sessions));
+  }
+  function createSession(uid) {
+    var id = uid || 'web-' + Math.random().toString(36).slice(2, 8);
+    var s = { id: id, title: null, updatedAt: Date.now() };
+    sessions.unshift(s);
+    saveSessions();
+    return s;
+  }
+  function deleteSession(sessionId) {
+    sessions = sessions.filter(function(s) { return s.id !== sessionId; });
+    saveSessions();
+  }
+  function updateSessionTitle(sessionId, title) {
+    var s = sessions.find(function(x) { return x.id === sessionId; });
+    if (s && !s.title && title) {
+      s.title = title.length > 50 ? title.slice(0, 50) + '…' : title;
+      s.updatedAt = Date.now();
+      saveSessions();
+    }
+  }
+  function touchSession(sessionId) {
+    var s = sessions.find(function(x) { return x.id === sessionId; });
+    if (s) { s.updatedAt = Date.now(); saveSessions(); }
+  }
+
+  // ── Sidebar rendering ──
+  function renderSidebar() {
+    var list = $('sessionList');
+    if (!list) return;
+
+    if (!sessions.length) {
+      list.innerHTML = '<div class="session-list-empty">暂无对话<br>点击上方按钮开始新对话</div>';
+      return;
+    }
+
+    list.innerHTML = '';
+    sessions.forEach(function(s) {
+      var item = document.createElement('div');
+      var isActive = s.id === activeUserId;
+      item.className = 'session-item' + (isActive ? ' active' : '');
+      item.dataset.sessionId = s.id;
+
+      var displayTitle = s.title || '新对话';
+      var dateStr = s.updatedAt
+        ? new Date(s.updatedAt).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
+        : '';
+
+      item.innerHTML =
+        '<div class="session-item-icon">' + (isActive ? '💬' : '🗨️') + '</div>' +
+        '<div class="session-item-info">' +
+          '<div class="session-item-title' + (s.title ? '' : ' empty') + '">' +
+            escapeHtml(displayTitle) +
+          '</div>' +
+          (dateStr ? '<div class="session-item-date">' + dateStr + '</div>' : '') +
+        '</div>' +
+        '<button class="session-item-del" title="删除对话">✕</button>';
+
+      item.addEventListener('click', function(e) {
+        if (e.target.closest('.session-item-del')) return;
+        if (s.id !== activeUserId) switchSession(s.id);
+      });
+
+      var delBtn = item.querySelector('.session-item-del');
+      delBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        handleDeleteSession(s.id);
+      });
+
+      list.appendChild(item);
+    });
+  }
+
+  function handleDeleteSession(sessionId) {
+    if (sessionId === activeUserId) {
+      var remaining = sessions.filter(function(s) { return s.id !== sessionId; });
+      if (remaining.length > 0) {
+        switchSession(remaining[0].id);
+      } else {
+        switchToNewSession();
+      }
+    }
+    deleteSession(sessionId);
+    renderSidebar();
+  }
+
+  // ── Session switching ──
+  function switchSession(sessionId) {
+    var s = sessions.find(function(x) { return x.id === sessionId; });
+    if (!s) return;
+
+    activeUserId = s.id;
+    userId = s.id;
+    localStorage.setItem('openant_userId', activeUserId);
+
+    // Clear chat DOM
+    var toRemove = chatMessages.querySelectorAll('.message, .sources-group');
+    toRemove.forEach(function(el) { el.remove(); });
+    if (welcomeScreen) welcomeScreen.style.display = '';
+    streamingBubble = null;
+    currentSourcesGroup = null;
+    sourceCards = {};
+    sourceCounter = 0;
+
+    loadHistory();
+    renderSidebar();
+    updateSendBtn();
+  }
+
+  function switchToNewSession() {
+    var newUserId = 'web-' + Math.random().toString(36).slice(2, 8);
+    createSession(newUserId);
+    closeSidebar();
+    switchSession(newUserId);
+  }
+
+  // ── Sidebar toggle (mobile) ──
+  function toggleSidebar() {
+    var sidebar = $('sidebar');
+    var overlay = $('sidebarOverlay');
+    sidebar.classList.toggle('open');
+    overlay.classList.toggle('visible');
+  }
+  function closeSidebar() {
+    var sidebar = $('sidebar');
+    var overlay = $('sidebarOverlay');
+    sidebar.classList.remove('open');
+    overlay.classList.remove('visible');
+  }
 
   async function loadAgents() {
     try {
@@ -475,6 +921,7 @@ body::after {
       connDot.classList.add('connected');
       statusText.textContent = '在线';
       reconnectDelay = 1000;
+      loadHistory();
     };
 
     ws.onclose = (e) => {
@@ -492,6 +939,22 @@ body::after {
       try { data = JSON.parse(e.data); } catch { return; }
 
       if (data.type === 'StreamChunkEvent' && data.content) {
+        // Check for structured payload (tool_result / status from pipeline)
+        try {
+          let payload = JSON.parse(data.content);
+          if (payload.tool_result) {
+            let tr = payload.tool_result;
+            let id = tr.name + '_' + sourceCounter;
+            upsertSourceCard(id, tr.name, tr.result, tr.result, null);
+            return;
+          }
+          // Show tool status in the header subtitle (non-intrusive)
+          if (payload.status) {
+            statusText.textContent = payload.status;
+            return;
+          }
+        } catch (_) { /* not JSON, treat as regular token */ }
+
         hideTyping();
         appendStreamToken(data.content);
       }
@@ -499,6 +962,7 @@ body::after {
       if (data.type === 'OutboundEvent') {
         hideTyping();
         finalizeStream(data.content);
+        statusText.textContent = '在线';
       }
 
       if (data.type === 'error') {
@@ -528,12 +992,59 @@ body::after {
     if (currentAgentId) payload.agent_id = currentAgentId;
 
     ws.send(JSON.stringify(payload));
+
+    // Auto-title: detect first message BEFORE appendMessage hides welcome screen
+    var isFirstMessage = welcomeScreen && welcomeScreen.style.display !== 'none';
+    if (isFirstMessage) {
+      updateSessionTitle(activeUserId, text);
+    }
+
     appendMessage('user', text);
+
+    if (isFirstMessage) {
+      renderSidebar();
+    }
+
     msgInput.value = '';
     autoResize();
     updateSendBtn();
     showTyping();
     streamingBubble = null;
+    currentSourcesGroup = null;
+    sourceCards = {};
+    sourceCounter = 0;
+    touchSession(activeUserId);
+  }
+
+  async function loadHistory() {
+    var seq = ++historyLoadSeq;
+    const source = 'platform-webSocket:' + activeUserId;
+    try {
+      const res = await fetch('/api/sessions/messages?source=' + encodeURIComponent(source));
+      if (seq !== historyLoadSeq) return; // stale response
+      const data = await res.json();
+      if (data.messages && data.messages.length) {
+        // Auto-title from first user message if session has no title yet
+        var firstUser = data.messages.find(function(m) { return m.role === 'user'; });
+        if (firstUser) updateSessionTitle(activeUserId, firstUser.content);
+
+        data.messages.forEach(m => {
+          if (m.role === 'tool') {
+            upsertSourceCard(m.tool_call_id, m.tool_name, m.preview, m.content, m.urls);
+          } else if (m.role === 'user') {
+            currentSourcesGroup = null;
+            appendMessage('user', m.content);
+          } else if (m.role === 'assistant') {
+            currentSourcesGroup = null;
+            if (m.content) appendMessage('agent', m.content);
+          }
+        });
+        currentSourcesGroup = null;
+      }
+      renderSidebar();
+    } catch (e) {
+      console.error('Failed to load history:', e);
+    }
   }
 
   function appendMessage(role, content) {
@@ -565,6 +1076,76 @@ body::after {
 
     chatMessages.insertBefore(wrap, typingIndicator);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  function upsertSourceCard(id, toolName, preview, fullContent, urls) {
+    if (welcomeScreen) welcomeScreen.style.display = 'none';
+
+    // Already have this card → update its body (for streaming updates)
+    if (sourceCards[id]) {
+      var card = sourceCards[id];
+      var body = card.querySelector('.source-card-body');
+      if (body) body.innerHTML = buildSourceBody(fullContent, urls);
+      var prevEl = card.querySelector('.preview');
+      if (prevEl && preview) prevEl.textContent = preview;
+      return;
+    }
+
+    // Create a new sources-group if needed (one group per agent turn)
+    if (!currentSourcesGroup) {
+      currentSourcesGroup = document.createElement('div');
+      currentSourcesGroup.className = 'sources-group';
+      chatMessages.insertBefore(currentSourcesGroup, typingIndicator);
+    }
+
+    sourceCounter++;
+    var label = toolName ? (toolName === 'web_search' ? '搜索' : toolName) : '来源';
+    var card = document.createElement('div');
+    card.className = 'source-card';
+    card.innerHTML =
+      '<div class="source-card-header">' +
+        '<span class="icon">📎</span>' +
+        '<span class="label">' + label + ' ' + sourceCounter + '</span>' +
+        '<span class="preview">' + escapeHtml(preview || '') + '</span>' +
+        '<span class="arrow">▶</span>' +
+      '</div>' +
+      '<div class="source-card-body">' + buildSourceBody(fullContent, urls) + '</div>';
+
+    card.querySelector('.source-card-header').addEventListener('click', function() {
+      card.classList.toggle('open');
+    });
+
+    currentSourcesGroup.appendChild(card);
+    sourceCards[id] = card;
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  function buildSourceBody(content, urls) {
+    var html = '';
+    // Show URLs as clickable links
+    if (urls && urls.length) {
+      html += '<div style="margin-bottom:6px;font-weight:600;font-size:12px;color:var(--gray-500)">🔗 来源链接</div>';
+      urls.forEach(function(u) {
+        html += '<a href="' + escapeHtml(u) + '" target="_blank" rel="noopener" ' +
+          'style="display:block;font-size:12px;color:var(--blue-500);text-decoration:none;' +
+          'padding:2px 0;word-break:break-all;" ' +
+          'onmouseover="this.style.textDecoration=\'underline\'" ' +
+          'onmouseout="this.style.textDecoration=\'none\'">' +
+          escapeHtml(u) + '</a>';
+      });
+    }
+    // Show truncated content
+    if (content) {
+      html += '<div style="margin-top:6px;font-size:11px;color:var(--gray-400);max-height:120px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">' +
+        escapeHtml(content) + '</div>';
+    }
+    return html;
+  }
+
+  function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
   }
 
   function appendStreamToken(token) {
@@ -635,6 +1216,25 @@ body::after {
     }
   });
   sendBtn.addEventListener('click', sendMessage);
+
+  // ── Sidebar event handlers ──
+  var newChatBtn = $('newChatBtn');
+  var sidebarToggle = $('sidebarToggle');
+  var sidebarOverlay = $('sidebarOverlay');
+  if (newChatBtn) newChatBtn.addEventListener('click', switchToNewSession);
+  if (sidebarToggle) sidebarToggle.addEventListener('click', toggleSidebar);
+  if (sidebarOverlay) sidebarOverlay.addEventListener('click', closeSidebar);
+
+  // Keyboard shortcut: Ctrl+Shift+N for new conversation
+  document.addEventListener('keydown', function(e) {
+    if (e.ctrlKey && e.shiftKey && e.key === 'N') {
+      e.preventDefault();
+      switchToNewSession();
+    }
+  });
+
+  // Initial sidebar render
+  renderSidebar();
 
   loadAgents();
   connect();

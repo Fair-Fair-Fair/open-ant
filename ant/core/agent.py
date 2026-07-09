@@ -7,8 +7,16 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from ant.core.context_guard import ContextGuard
+from ant.core.session_fsm import SessionFSM, SessionPhase
 from ant.core.session_state import SessionState
 from ant.core.events import EventSource
+from ant.core.stream_pipeline import StreamPipeline, PipelineContext
+from ant.core.stream_stages import (
+    StreamValidationStage, StreamObservabilityStage, StreamContextBuildStage,
+    StreamContextGuardStage, StreamLLMCallStage, StreamToolExecutionStage,
+    StreamTerminalStage,
+)
+from ant.core.tracer import ExecutionTracer
 from ant.provider.llm import LLMProvider
 from ant.tools.registry import ToolRegistry
 from ant.tools.skill_tool import create_skill_tool
@@ -178,6 +186,8 @@ class AgentSession:
     context_guard: ContextGuard
     tools: ToolRegistry
     started_at: datetime = field(default_factory=datetime.now)
+    fsm: SessionFSM = field(default_factory=SessionFSM)
+    tracer: ExecutionTracer = field(default_factory=ExecutionTracer)
 
     @property
     def session_id(self) -> str:
@@ -194,60 +204,95 @@ class AgentSession:
         """Delegate to state."""
         return self.state.shared_context
 
-    async def chat(self, message: str) -> str:
-        """Send a message to the LLM and get a response."""
+    def _truncate_old_tool_results(self) -> None:
+        """Truncate tool messages from previous turns in the in-memory state.
+
+        The LLM has already seen the full results and synthesized a response.
+        Keeping them in full bloats the context for every subsequent turn.
+        We keep the first ~500 chars which capture the title and source URL.
+        """
+        MAX_TOOL = 500
+        for i, msg in enumerate(self.state.messages):
+            if msg.get("role") == "tool":
+                content = msg.get("content", "")
+                if isinstance(content, str) and len(content) > MAX_TOOL:
+                    self.state.messages[i] = {**msg, "content": content[:MAX_TOOL] + "…"}
+
+    async def harness_stream_chat(self, message: str) -> AsyncGenerator[Dict[str, Any], None]:
+        """Streaming chat via harness pipeline.
+
+        Each turn is traced (ExecutionTracer) and the session lifecycle
+        is governed by a finite state machine (SessionFSM).
+        """
+        _logger = logging.getLogger(__name__)
+
+        # Truncate tool results from *previous* turns so they don't bloat
+        # the context.  The LLM already synthesized them into its response;
+        # keeping only the first ~500 chars (title + URL) is sufficient for
+        # future turns to recall what was searched.
+        self._truncate_old_tool_results()
+
         user_msg: Message = {"role": "user", "content": message}
         self.state.add_message(user_msg)
-
-        # RAG: retrieve relevant memories before building prompt
         await self._retrieve_memories()
 
-        tool_schemas = self.tools.get_tool_schemas()
-        logger = logging.getLogger(__name__)
+        # ── FSM: enter active processing ──
+        try:
+            self.fsm.transition_to(SessionPhase.ACTIVE)
+        except ValueError as exc:
+            _logger.warning("FSM transition skipped: %s", exc)
 
-        while True:
-            messages = self.state.build_messages()
-            self.state = await self.context_guard.check_and_compact(self.state)
-            content, tool_calls, stop_reason = await self.agent.llm.chat(messages, tool_schemas)
+        # ── Start execution trace ──
+        trace = self.tracer.start_trace(self.session_id)
 
-            tool_call_dicts: list[ChatCompletionMessageToolCallParam] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.name, "arguments": tc.arguments},
-                }
-                for tc in tool_calls
-            ]
-            assistant_msg: Message = {
-                "role": "assistant",
-                "content": content,
-            }
-            if tool_call_dicts:
-                assistant_msg["tool_calls"] = tool_call_dicts
+        pipeline = StreamPipeline()
+        pipeline.add_stage(StreamValidationStage())
+        pipeline.add_stage(StreamObservabilityStage())
+        pipeline.add_stage(StreamContextBuildStage())
+        pipeline.add_stage(StreamContextGuardStage())
+        pipeline.add_stage(StreamLLMCallStage())
+        pipeline.add_stage(StreamToolExecutionStage())
+        pipeline.add_stage(StreamTerminalStage())
 
-            self.state.add_message(assistant_msg)
+        ctx = PipelineContext(
+            session=self,
+            user_message=message,
+            tool_schemas=self.tools.get_tool_schemas(),
+            trace=trace,
+        )
 
-            if stop_reason == "tool_calls":
-                await self._handle_tool_calls(tool_calls)
-                continue
-
-            if stop_reason == "length":
-                logger.warning(
-                    "LLM response truncated (max_tokens reached), "
-                    "returning partial response"
+        error_occurred = False
+        async for event in pipeline.run(ctx):
+            if event.get("type") == "error":
+                _logger.error(
+                    "Stream error in session %s: %s",
+                    self.session_id,
+                    event.get("data", "unknown"),
                 )
+                error_occurred = True
+            yield event
 
-            if stop_reason == "content_filter":
-                logger.warning("LLM response filtered by content filter")
-                return content if content else "I'm unable to respond to that request."
+        # ── FSM: terminal state ──
+        try:
+            if error_occurred:
+                self.fsm.transition_to(SessionPhase.FAILED)
+            else:
+                self.fsm.transition_to(SessionPhase.COMPLETED)
+        except ValueError as exc:
+            _logger.warning("FSM transition skipped: %s", exc)
 
-            break
+        # ── Finish trace ──
+        trace_summary = self.tracer.finish_trace(trace)
+        _logger.info(
+            "Trace summary: session=%s spans=%d duration=%.0fms",
+            self.session_id,
+            trace_summary.get("total_spans", 0),
+            trace_summary.get("total_duration_ms", 0),
+        )
 
-        # RAG: asynchronously extract memories from this conversation
+        # ── Async memory extraction ──
         task = asyncio.create_task(self._maybe_extract_memories())
         task.add_done_callback(self._on_memory_extraction_done)
-
-        return content
 
     def _on_memory_extraction_done(self, task: asyncio.Task) -> None:
         """Callback to log any unhandled exceptions from memory extraction."""
@@ -391,23 +436,6 @@ class AgentSession:
         except Exception as e:
             logger.warning(f"Memory extraction failed: {e}", exc_info=True)
 
-    async def _handle_tool_calls(
-        self,
-        tool_calls: list["LLMToolCall"],
-    ) -> None:
-        """Handle tool calls from the LLM response."""
-        tool_call_results = await asyncio.gather(
-            *[self._execute_tool_call(tool_call) for tool_call in tool_calls]
-        )
-
-        for tool_call, result in zip(tool_calls, tool_call_results):
-            tool_msg: Message = {
-                "role": "tool",
-                "content": result,
-                "tool_call_id": tool_call.id,
-            }
-            self.state.add_message(tool_msg)
-
     async def _execute_tool_call(
         self,
         tool_call: "LLMToolCall",
@@ -426,74 +454,3 @@ class AgentSession:
 
         return result
 
-    async def stream_chat(self, message: str) -> AsyncGenerator[Dict[str, Any], None]:
-        """流式对话，产生事件：'token', 'tool_calls', 'status', 'tool_result', 'done', 'error'"""
-        user_msg: Message = {"role": "user", "content": message}
-        self.state.add_message(user_msg)
-        await self._retrieve_memories()
-
-        tool_schemas = self.tools.get_tool_schemas()
-        logger = logging.getLogger(__name__)
-
-        while True:
-            messages = self.state.build_messages()
-            self.state = await self.context_guard.check_and_compact(self.state)
-
-            # 这里调用 LLMProvider.stream_chat
-            async for chunk in self.agent.llm.stream_chat(messages, tool_schemas):
-                event_type = chunk.get("type")
-
-                if event_type == "token":
-                    yield {"type": "token", "data": chunk["data"]}
-
-                elif event_type == "tool_calls":
-                    tool_calls = chunk["data"]  # list[LLMToolCall]
-                    # 可以发送一个状态，告知前端即将执行工具
-                    yield {"type": "status", "data": f"正在执行 {len(tool_calls)} 个工具..."}
-
-                    # 执行所有工具
-                    tool_results = []
-                    for tc in tool_calls:
-                        result = await self._execute_tool_call(tc)
-                        tool_results.append(result)
-                        # 单个工具完成结果
-                        yield {"type": "tool_result", "data": {"name": tc.name, "result": result}}
-
-                    # 将 assistant 消息（含 tool_calls）和 tool 结果加入 state
-                    assistant_msg: Message = {
-                        "role": "assistant",
-                        "content": "",  # 首轮可能无文本，但有时也有文本 + tool_calls，视情况而定
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {"name": tc.name, "arguments": tc.arguments}
-                            }
-                            for tc in tool_calls
-                        ]
-                    }
-                    self.state.add_message(assistant_msg)
-                    for tc, result in zip(tool_calls, tool_results):
-                        self.state.add_message({
-                            "role": "tool",
-                            "content": result,
-                            "tool_call_id": tc.id
-                        })
-
-                    # 工具执行完毕，继续循环（让 LLM 基于工具结果再次生成）
-                    break  # 跳出 for，继续 while
-
-                elif event_type == "done":
-                    # 生成结束
-                    yield {"type": "done", "finish_reason": chunk.get("finish_reason", "stop")}
-                    return  # 直接结束生成器
-
-                elif event_type == "error":
-                    yield {"type": "error", "data": chunk["data"]}
-                    return
-
-            else:
-                # 如果 for 循环正常结束（没有 break），说明没有 tool_calls 也没有 done，但正常情况会有 done
-                # 这里可以认为结束了
-                yield {"type": "done", "finish_reason": "stop"}
-                break

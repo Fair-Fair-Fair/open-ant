@@ -8,6 +8,7 @@ Agent 工作模块 —— 负责接收入站事件并将其分发给对应的 Ag
   5. 对异常会话进行有限次数的自动重试
 """
 import asyncio
+import json
 import logging
 from dataclasses import replace  # 用于不可变 dataclass 的字段替换（如重试时递增 retry_count）
 from typing import Union, TYPE_CHECKING
@@ -122,10 +123,10 @@ class AgentWorker(SubscribeWorker):
                     except ValueError:
                         # 会话不存在（可能是首次对话或历史被清理），创建新会话并绑定原 session_id
                         logger.warning(f"Session {session_id} not found, creating new")
-                        session = agent.new_session(session_id=session_id)
+                        session = agent.new_session(source=event.source, session_id=session_id)
                 else:
                     # 没有 session_id 时创建全新会话，由 Agent 自动生成 session_id
-                    session = agent.new_session()
+                    session = agent.new_session(source=event.source)
                     session_id = session.session_id
 
                 # ── 斜杠命令优先处理 ──
@@ -142,7 +143,7 @@ class AgentWorker(SubscribeWorker):
                     # 如果命令未匹配（result 为空），则继续走 Agent 对话流程
 
                 collected_content = ""
-                async for chunk in session.stream_chat(event.content):
+                async for chunk in session.harness_stream_chat(event.content):
                     chunk_type = chunk.get("type")
 
                     if chunk_type == "token":
@@ -153,10 +154,25 @@ class AgentWorker(SubscribeWorker):
                         )
 
                     elif chunk_type == "status":
-                        logger.info(f"Stream status: {chunk['data']}")
+                        # Forward as structured JSON so the frontend can
+                        # display it cleanly (or skip if already shown elsewhere).
+                        await self._emit_stream_chunk(
+                            event,
+                            json.dumps({"status": chunk["data"]}, ensure_ascii=False),
+                            agent_def.id,
+                        )
 
                     elif chunk_type == "tool_result":
-                        logger.debug(f"Tool result: {chunk['data'].get('name')}")
+                        logger.debug(
+                            "Tool result: %s", chunk["data"].get("name")
+                        )
+                        # Forward tool result to frontend as JSON so it can
+                        # render a collapsible source card in real time.
+                        await self._emit_stream_chunk(
+                            event,
+                            json.dumps({"tool_result": chunk["data"]}, ensure_ascii=False),
+                            agent_def.id,
+                        )
 
                     elif chunk_type == "done":
                         break

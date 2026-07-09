@@ -1,8 +1,10 @@
 """Tool registry for managing available tools."""
+import time
 from typing import TYPE_CHECKING, Any
 
 from ant.tools.base import BaseTool
 from ant.tools.builtin_tools import bash, edit_file, read_file, write_file
+from ant.tools.policy import ToolGovernance
 
 if TYPE_CHECKING:
     from ant.core.agent import AgentSession
@@ -10,9 +12,10 @@ if TYPE_CHECKING:
 
 class ToolRegistry:
     """Registry for all available tools."""
-    def __init__(self) -> None:
+    def __init__(self, governance: ToolGovernance | None = None) -> None:
         """Initialize an empty tool registry"""
         self._tools: dict[str, BaseTool] = {}
+        self._governance = governance
 
     def register(self, tool: BaseTool) -> None:
         """Register a tool"""
@@ -30,13 +33,29 @@ class ToolRegistry:
         return [tool.get_tool_schema() for tool in self._tools.values()]
 
     async def execute_tool(
-            self,name: str, session: "AgentSession", **kwargs: Any
+            self, name: str, session: "AgentSession", **kwargs: Any
     ) -> str:
-        """Execute a tool by name"""
         tool = self.get(name)
         if tool is None:
             raise ValueError(f"tool not found name: {name}")
-        return await tool.execute(session=session, **kwargs)
+
+        if self._governance:
+            allowed, reason = self._governance.check_permission(name, session)
+            if not allowed:
+                return f"Tool call denied: {reason}"
+
+        start = time.time()
+        try:
+            result = await tool.execute(session=session, **kwargs)
+            elapsed = time.time() - start
+            if self._governance:
+                self._governance.record_call(name, kwargs, result, elapsed)
+            return result
+        except Exception as e:
+            elapsed = time.time() - start
+            if self._governance:
+                self._governance.record_call(name, kwargs, str(e), elapsed)
+            raise
 
     @classmethod
     def with_builtins(cls) -> "ToolRegistry":

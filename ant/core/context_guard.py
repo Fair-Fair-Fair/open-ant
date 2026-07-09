@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 # Default max size for tool result content before truncation
-MAX_TOOL_RESULT_CHARS = 10000
+MAX_TOOL_RESULT_CHARS = 1000
 
 COMPACT_PROMPT = """Your task is to create a detailed summary of the conversation so far, capturing the user's requests, your actions, and any important context needed to continue without losing information.
 

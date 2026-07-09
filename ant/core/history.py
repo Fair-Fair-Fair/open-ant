@@ -13,6 +13,11 @@ if TYPE_CHECKING:
 
 from ant.core.events import EventSource
 
+# Tool results are truncated before persistence to prevent context bloat.
+# The LLM uses the full result in the current turn; future turns only need
+# a brief reference (title + URL, which the first ~500 chars capture).
+MAX_PERSISTED_TOOL_CHARS = 500
+
 
 def _now_iso() -> str:
     """Return current datetime as ISO format string."""
@@ -53,7 +58,13 @@ class HistoryMessage(BaseModel):
 
     @classmethod
     def from_message(cls, message: Message) -> "HistoryMessage":
-        """Create HistoryMessage from litellm Message format."""
+        """Create HistoryMessage from litellm Message format.
+
+        Tool results are truncated to ``MAX_PERSISTED_TOOL_CHARS`` to prevent
+        storage bloat and context pollution on session resume.  The full
+        content is used by the LLM in the current turn; future turns only
+        need a brief reference.
+        """
         tool_calls = None
         if message.get("tool_calls"):
             tool_calls = [
@@ -67,9 +78,13 @@ class HistoryMessage(BaseModel):
 
         tool_call_id = message.get("tool_call_id")
 
+        content = str(message.get("content", ""))
+        if message.get("role") == "tool" and len(content) > MAX_PERSISTED_TOOL_CHARS:
+            content = content[:MAX_PERSISTED_TOOL_CHARS] + "…"
+
         return cls(
             role=message["role"],
-            content=str(message.get("content", "")),
+            content=content,
             tool_calls=tool_calls,
             tool_call_id=tool_call_id,
         )

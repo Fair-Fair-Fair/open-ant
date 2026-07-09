@@ -1,4 +1,5 @@
 """FastAPI application with Websocket support"""
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket
@@ -6,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from ant.core.context import SharedContext
+
+_URL_RE = re.compile(r"https?://[^\s)\]]+")
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -56,6 +59,60 @@ def create_app(context: SharedContext) -> FastAPI:
         """Get public config for the web UI"""
         return JSONResponse({
             "default_agent": context.config.default_agent,
+        })
+
+    @app.get("/api/sessions/messages")
+    async def get_session_messages(source: str = ""):
+        """Return historical messages for a given source (e.g. platform-webSocket:web-xxx).
+
+        The frontend calls this on page load to restore the conversation UI
+        after a refresh. Tool results include a resolved ``tool_name`` so the
+        frontend can render them as collapsible source cards instead of raw text.
+        """
+        if not source:
+            return JSONResponse({"error": "source query parameter is required"}, status_code=400)
+
+        # Look up session_id from the runtime source→session cache
+        source_session = context.config.sources.get(source)
+        if not source_session:
+            return JSONResponse({"messages": []})
+
+        session_id = source_session.session_id
+        history_msgs = context.history_store.get_messages(session_id)
+
+        # Build a tool_call_id → name mapping from assistant messages
+        tool_names: dict[str, str] = {}
+        for m in history_msgs:
+            if m.role == "assistant" and m.tool_calls:
+                for tc in m.tool_calls:
+                    tc_id = tc.get("id", "")
+                    tc_name = tc.get("function", {}).get("name", "unknown")
+                    if tc_id:
+                        tool_names[tc_id] = tc_name
+
+        enriched = []
+        for m in history_msgs:
+            entry: dict = {"role": m.role, "content": m.content}
+            if m.role == "tool" and m.tool_call_id:
+                entry["tool_call_id"] = m.tool_call_id
+                entry["tool_name"] = tool_names.get(m.tool_call_id, "unknown")
+                # Extract URLs for source link display
+                urls = _URL_RE.findall(m.content)
+                entry["urls"] = urls[:3]  # top 3 URLs at most
+                # First line preview (title) for the card header
+                first_line = m.content.split("\n")[0].strip() if m.content else ""
+                preview = first_line[:100] if first_line else m.content[:100]
+                entry["preview"] = preview + ("…" if len(m.content) > 100 else "")
+            if m.role == "assistant" and m.tool_calls:
+                entry["tool_calls"] = [
+                    {"id": tc.get("id"), "name": tc.get("function", {}).get("name", "")}
+                    for tc in m.tool_calls if tc.get("id")
+                ]
+            enriched.append(entry)
+
+        return JSONResponse({
+            "session_id": session_id,
+            "messages": enriched,
         })
 
     # Websocket endpoint
