@@ -118,7 +118,8 @@ def create_app(context: SharedContext) -> FastAPI:
     # Websocket endpoint
     @app.websocket("/web_socket")
     async def websocket_endpoint(web_socket: WebSocket):
-        """WebSocket endpoint for real-time event streaming and chat"""
+        """WebSocket endpoint for real-time event streaming and chat
+        正式完成 WebSocket 的握手（HTTP 状态码 101 Switching Protocols）"""
         await web_socket.accept()
 
         # Check if websocket worker is available

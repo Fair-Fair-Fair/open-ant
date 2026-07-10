@@ -405,8 +405,10 @@ Identity(AGENT.md) → Soul(SOUL.md) → Bootstrap → Runtime → Channel Hint 
 | 🤖 Agent Runtime | Session 管理 + Tool Calling | ✅ |
 | 🔀 Routing Engine | 三层正则路由 | ✅ |
 | 🛡 **Sandbox** | Path / Command / Network 三层动作边界 | ✅ |
-| 🧱 **Guardrails** | InputGuard (注入检测) + OutputGuard (脱敏) | ✅ |
+| 🧱 **Guardrails** | InputGuard (注入检测+混合脚本+NFKC) + OutputGuard (脱敏+warn/strip/block) | ✅ |
 | 🔒 **ToolGovernance** | 权限控制 + 调用限额 + 审计日志 | ✅ |
+| 🛑 **Human-in-the-Loop** | `require_confirmation` UI 审批流 + 30s 超时自动拒绝 | ✅ |
+| 🛡 **Evasion Testing** | 34 对抗用例 × 9 类绕过技术, 76% 检测率 | ✅ |
 | 📊 **SessionFSM** | 8 阶段状态机 + 转换表 | ✅ |
 | ⚡ **StreamPipeline** | 9 阶段流式中间件链 | ✅ |
 | 🔍 **ExecutionTracer** | Span-based 可观测性追踪 | ✅ |
@@ -428,12 +430,14 @@ Identity(AGENT.md) → Soul(SOUL.md) → Bootstrap → Runtime → Channel Hint 
 
 当前 Sandbox 和 Guardrails 的薄弱环节。
 
-| 条目 | 说明 |
-|------|------|
-| **Human-in-the-Loop** | `require_confirmation` 工具的 UI 审批流——高权限操作必须人类确认 |
-| **Container Sandbox** | Docker/nsjail 进程级隔离，替代启发式命令解析——真正的 shell 安全 |
-| **Tool Result Injection Hardening** | 当前 `scan_tool_result` 只加警告标记；考虑 sandbox 级别的工具结果隔离 |
-| **Guardrail Evasion Testing** | 对抗性测试——用已知 bypass 技术（编码/分段/多语言）验证注入检测鲁棒性 |
+| 条目 | 说明 | 状态 |
+|------|------|:----:|
+| **Human-in-the-Loop** | `require_confirmation` 工具的 UI 审批流——高权限操作必须人类确认，30s 超时自动拒绝 | ✅ |
+| **Tool Result Injection Hardening** | `scan_tool_result` 支持 warn / strip / block 三种模式；混合脚本检测（Latin+Cyrillic 同形字）；NFKC Unicode 规范化 | ✅ |
+| **Guardrail Evasion Testing** | 34 个对抗用例覆盖 9 类绕过技术：Unicode 同形字、零宽字符、文本分段、大小写、分隔符变体、上下文填充、多语言 —— 检测率 76% | ✅ |
+| **Container Sandbox** | Docker/nsjail 进程级隔离，替代启发式命令解析——真正的 shell 安全 | 🔜 |
+| **Session Leak Fix** | 被 Guardrail 阻断的消息不再持久化到会话历史——防止 LLM 在后续轮次"补答"被拒问题 | ✅ |
+| **Production Error Messages** | 面向用户返回通用安全提示，不再泄露内部正则模式；详细匹配日志仅写入服务端 | ✅ |
 
 ### 🟡 Phase 2 · Production Hardening（生产加固）
 

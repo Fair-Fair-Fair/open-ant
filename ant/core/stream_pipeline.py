@@ -31,8 +31,8 @@ class PipelineContext:
     tool_calls: list[Any] = field(default_factory=list)
     stop_reason: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
-    iteration: int = 0
-    max_iterations: int = 10
+    iteration: int = 0  # 在 StreamToolExecutionStage 阶段，每当成功执行完一组tool_calls后，会执行 ctx.iteration += 1。
+    max_iterations: int = 10  # Agent 最多可以连续进行 10 轮“AI思考→调用一组工具→执行完毕→AI继续思考”的循环。
     start_time: float = field(default_factory=time.time)
     trace: "Trace | None" = None
 

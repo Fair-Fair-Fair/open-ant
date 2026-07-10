@@ -189,6 +189,32 @@ class StreamChunkEvent(Event):
     pass
 
 
+@dataclass
+class ConfirmationRequestEvent(Event):
+    """Event requesting user approval for a high-privilege tool call.
+
+    Sent to the WebSocket frontend; the user must approve or deny.
+    The backend waits for a ``ConfirmationResponseEvent`` before proceeding.
+    """
+
+    request_id: str = ""
+    tool_name: str = ""
+    tool_args: str = ""
+    timeout: float = 30.0
+
+
+@dataclass
+class ConfirmationResponseEvent(Event):
+    """Event carrying the user's response to a confirmation request.
+
+    Sent from the WebSocket frontend back to the backend.
+    ``approved=True`` means proceed with the tool call.
+    """
+
+    approved: bool = False
+    request_session_id: str = ""
+
+
 # Registry mapping event class names to event classes
 _EVENT_CLASSES: dict[str, type[Event]] = {
     "InboundEvent": InboundEvent,
@@ -196,6 +222,8 @@ _EVENT_CLASSES: dict[str, type[Event]] = {
     "DispatchEvent": DispatchEvent,
     "DispatchResultEvent": DispatchResultEvent,
     "StreamChunkEvent": StreamChunkEvent,
+    "ConfirmationRequestEvent": ConfirmationRequestEvent,
+    "ConfirmationResponseEvent": ConfirmationResponseEvent,
 }
 
 

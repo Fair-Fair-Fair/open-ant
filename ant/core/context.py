@@ -19,6 +19,7 @@ from ant.core.routing import RoutingTable
 
 from ant.core.sandbox import Sandbox
 from ant.core.guardrails import Guardrails
+from ant.core.confirmation import ConfirmationBroker
 
 # 12-cron-heartbeat
 from ant.core.cron_loader import CronLoader
@@ -70,6 +71,9 @@ class SharedContext:
     # harness: input/output guardrails
     guardrails: Guardrails
 
+    # harness: human-in-the-loop confirmation
+    confirmation_broker: ConfirmationBroker
+
     def __init__(self, config: Config,
                  channels: list[Channel[Any]] | None = None) -> None:
         self.config = config
@@ -96,6 +100,9 @@ class SharedContext:
 
         # harness: input/output guardrails
         self.guardrails = Guardrails(config.guardrails)
+
+        # harness: human-in-the-loop confirmation
+        self.confirmation_broker = ConfirmationBroker()
 
         # 16 rag-memory
         self._init_memory(config)

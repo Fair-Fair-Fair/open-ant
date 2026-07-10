@@ -242,8 +242,14 @@ class AgentSession:
         # future turns to recall what was searched.
         self._truncate_old_tool_results()
 
-        user_msg: Message = {"role": "user", "content": message}
-        self.state.add_message(user_msg)
+        # ── IMPORTANT: do NOT add the user message to session state yet. ──
+        # If the input guardrail blocks this message (prompt injection),
+        # we must not persist the blocked message in history — otherwise
+        # the LLM will "answer" the blocked question in a future turn,
+        # completely bypassing the guardrail.
+        #
+        # The user message is added later in StreamContextBuildStage
+        # (after StreamInputGuardStage has passed).
         await self._retrieve_memories()
 
         # ── FSM: enter active processing ──

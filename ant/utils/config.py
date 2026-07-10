@@ -193,6 +193,11 @@ class OutputGuardrailConfig(BaseModel):
     """Max characters in agent response. 0 = unlimited."""
     detect_tool_injection: bool = True
     """Scan tool results for prompt injection before they enter LLM context."""
+    tool_result_action: Literal["warn", "strip", "block"] = "warn"
+    """Action when injection is detected in a tool result.
+    - ``warn``: prepend ⚠️ security warning (default — agent sees result + warning)
+    - ``strip``: remove the injected portion using regex
+    - ``block``: replace entire tool result with safety message"""
     redact_patterns: list[str] | None = None
     """Custom regex patterns for secret redaction. None = use built-in defaults."""
     blocked_patterns: list[str] | None = None

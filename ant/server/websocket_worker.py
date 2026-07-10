@@ -11,7 +11,11 @@ from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError, BaseModel, Field
 
 from .worker import SubscribeWorker
-from ant.core.events import EventSource, Event, InboundEvent, OutboundEvent, StreamChunkEvent, WebSocketEventSource
+from ant.core.events import (
+    EventSource, Event, InboundEvent, OutboundEvent,
+    StreamChunkEvent, ConfirmationRequestEvent,
+    ConfirmationResponseEvent, WebSocketEventSource,
+)
 from ant.utils.config import SourceSessionConfig
 
 if TYPE_CHECKING:
@@ -36,7 +40,9 @@ class WebSocketWorker(SubscribeWorker):
         self.clients: Set[WebSocket] = set()
 
         # Auto-subscribe to event classes
-        for event_class in [InboundEvent, OutboundEvent, StreamChunkEvent]:
+        for event_class in [
+            InboundEvent, OutboundEvent, StreamChunkEvent, ConfirmationRequestEvent,
+        ]:
             self.context.eventbus.subscribe(event_class, self.handle_event)
         self.logger.info("WebSocketWorker subscribed to event types")
 
@@ -89,6 +95,26 @@ class WebSocketWorker(SubscribeWorker):
             try:
                 data = await web_socket.receive_json()
                 msg = WebsocketMessage(**data)
+
+                # ── Confirmation response handling ──
+                # If the message is a ConfirmationResponseEvent, route it
+                # to the broker instead of creating an InboundEvent.
+                if msg.content.startswith("__confirm__:") and ":" in msg.content:
+                    try:
+                        _, request_id, approved_str = msg.content.split(":", 2)
+                        approved = approved_str == "true"
+                        self.context.confirmation_broker.respond(
+                            request_id, approved,
+                        )
+                        self.logger.info(
+                            "Confirmation response: id=%s approved=%s", request_id, approved,
+                        )
+                    except ValueError as exc:
+                        self.logger.warning(
+                            "Malformed confirmation response: %s", exc,
+                        )
+                    continue
+                # ─────────────────────────────────────
 
                 event = self._normalize_message(msg)
 

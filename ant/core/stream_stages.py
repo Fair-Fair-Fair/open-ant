@@ -158,10 +158,22 @@ class StreamObservabilityStage(StreamPipelineStage):
 
 
 class StreamContextBuildStage(StreamPipelineStage):
-    """Build the message list from session state (system prompt + history)."""
+    """Build the message list from session state (system prompt + history).
+
+    Also persists the user message to session history — at this point the
+    input guardrail (StreamInputGuardStage) has already passed, so we know
+    the message is safe to store.
+    """
 
     async def execute(self, ctx, next):
         span = _start_span(ctx, "ContextBuildStage")
+
+        # Persist the user message NOW — after InputGuard has cleared it.
+        # Only add on the first iteration; subsequent iterations are tool-call
+        # continuations within the same turn.
+        if ctx.iteration == 0:
+            user_msg: dict = {"role": "user", "content": ctx.user_message}
+            ctx.session.state.add_message(user_msg)
 
         ctx.messages = ctx.session.state.build_messages()
 
@@ -291,6 +303,39 @@ class StreamToolExecutionStage(StreamPipelineStage):
                     "type": "status",
                     "data": f"⏳ 执行中: {tc.name}…",
                 }
+
+                # ── Human-in-the-Loop: require confirmation for high-privilege tools ──
+                tools = ctx.session.tools
+                if tools and tools._governance:
+                    policy = tools._governance.policy
+                    if tc.name in policy.require_confirmation:
+                        yield {
+                            "type": "status",
+                            "data": f"⏳ 等待批准: {tc.name}…",
+                        }
+
+                        broker = ctx.session.shared_context.confirmation_broker
+                        approved = await broker.request_approval(
+                            session_id=ctx.session.session_id,
+                            tool_name=tc.name,
+                            tool_args=tc.arguments,
+                            context=ctx.session.shared_context,
+                            agent_id=ctx.session.agent.agent_def.id if ctx.session.agent else "",
+                        )
+
+                        if not approved:
+                            result = (
+                                f"Tool call denied: the user did not approve "
+                                f"the execution of '{tc.name}'."
+                            )
+                            tool_results.append(result)
+                            if tool_span:
+                                tool_span.add_event("confirmation_denied", {
+                                    "tool": tc.name,
+                                })
+                                _finish_span(tool_span, "ok")
+                            continue
+                # ────────────────────────────────────────────────────────────
 
                 result = await ctx.session._execute_tool_call(tc)
 
