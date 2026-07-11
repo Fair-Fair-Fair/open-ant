@@ -250,6 +250,9 @@ class AgentSession:
         #
         # The user message is added later in StreamContextBuildStage
         # (after StreamInputGuardStage has passed).
+        # Reset per-turn confirmation denials (new user message = new turn)
+        self.shared_context.confirmation_broker.reset_turn(self.session_id)
+
         await self._retrieve_memories()
 
         # ── FSM: enter active processing ──

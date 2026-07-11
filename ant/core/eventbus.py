@@ -47,7 +47,8 @@ class EventBus(Worker):
     async def publish(self, event: Event) -> None:
         """Publish an event to the internal queue (non-blocking)"""
         await self._queue.put(event)
-        logger.debug(f"Queued {event.__class__.__name__} event")
+        if event.__class__.__name__ != "StreamChunkEvent":
+            logger.debug(f"Queued {event.__class__.__name__} event")
 
     async def run(self) -> None:
         """Process events from queue, starting with recovery"""
@@ -74,7 +75,8 @@ class EventBus(Worker):
         """Persist if OUTBOUND, then notify subscribers"""
         await self._persist_outbound(event)
         await self._notify_subscribers(event)
-        logger.debug(f"Dispatched {event.__class__.__name__} event from {event.source}")
+        if event.__class__.__name__ != "StreamChunkEvent":
+            logger.debug(f"Dispatched {event.__class__.__name__} event from {event.source}")
 
     async def _notify_subscribers(self, event: Event) -> None:
         """Notify all subscribers of an event (waits for all handlers to complte)"""

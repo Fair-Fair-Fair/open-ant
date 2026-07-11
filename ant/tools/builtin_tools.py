@@ -117,10 +117,24 @@ async def edit_file(path: str, old_string: str, new_string: str, session: "Agent
           "required": ["command"]
       })
 async def bash(command: str, session: "AgentSession") -> str:
-    """Execute a bash command and return the output."""
+    """Execute a bash command and return the output.
+
+    When ``sandbox.command.backend`` is ``"docker"``, the command runs
+    inside an isolated Docker container (ephemeral, network-disabled,
+    memory-limited, workspace read-only).  When ``"host"`` (default),
+    the command runs as a native subprocess on the host.
+    """
     sb = session.shared_context.sandbox.command
     sb.validate_command(command)
 
+    if sb.backend == "docker":
+        return await _bash_docker(sb, command, session.session_id)
+    else:
+        return await _bash_host(sb, command)
+
+
+async def _bash_host(sb, command: str) -> str:
+    """Execute *command* directly on the host (legacy behaviour)."""
     try:
         process = await asyncio.create_subprocess_shell(
             command,
@@ -144,3 +158,24 @@ async def bash(command: str, session: "AgentSession") -> str:
         return f"Error: Command timed out after {sb.timeout} seconds"
     except Exception as e:
         return f"Error executing command: {e}"
+
+
+async def _bash_docker(sb, command: str, session_id: str) -> str:
+    """Execute *command* inside an isolated Docker container."""
+    # Lazy import to avoid circular dependency:
+    # builtin_tools → sandbox.SandboxViolation → core.__init__ → agent → registry → builtin_tools
+    from ant.core.sandbox import SandboxViolation
+
+    try:
+        stdout, stderr = await sb.execute_in_docker(command, session_id)
+    except SandboxViolation as e:
+        return f"Safety violation ({e.violation_type}): {e}"
+    except Exception as e:
+        return f"Error executing command in Docker sandbox: {e}"
+
+    stdout = sb.validate_output(stdout)
+    stderr = sb.validate_output(stderr)
+
+    if stdout and stderr:
+        return f"{stdout}\n{stderr}"
+    return stdout or stderr or "Command completed with no output"

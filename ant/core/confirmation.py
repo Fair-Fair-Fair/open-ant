@@ -53,10 +53,17 @@ class ConfirmationBroker:
     def __init__(self, timeout: float = DEFAULT_CONFIRMATION_TIMEOUT):
         self._timeout = timeout
         self._pending: dict[str, PendingConfirmation] = {}
+        # Per-session cache: remember denied tools so retries within the
+        # same turn don't trigger redundant approval dialogs.
+        self._denied: dict[str, set[str]] = {}   # session_id -> {tool_name, ...}
 
     @property
     def timeout(self) -> float:
         return self._timeout
+
+    def reset_turn(self, session_id: str) -> None:
+        """Clear the per-turn denial cache at the start of a new user turn."""
+        self._denied.pop(session_id, None)
 
     async def request_approval(
         self,
@@ -71,7 +78,19 @@ class ConfirmationBroker:
         Sends a ``ConfirmationRequestEvent`` to the frontend and waits for
         the user's response (or timeout).  Returns ``False`` on timeout
         or explicit denial.
+
+        If the user already denied this tool in the current turn, returns
+        ``False`` immediately without showing another dialog.
         """
+        # If this tool was already denied in this session, auto-deny.
+        denied_tools = self._denied.get(session_id, set())
+        if tool_name in denied_tools:
+            logger.info(
+                "Auto-deny %s for session %s (previously denied this turn)",
+                tool_name, session_id,
+            )
+            return False
+
         request_id = str(uuid.uuid4())[:8]
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -131,6 +150,15 @@ class ConfirmationBroker:
         if pending.future.done():
             logger.debug("Confirmation already resolved: %s", request_id)
             return False
+
+        # Cache denial so retries within the same turn don't re-prompt
+        if not approved:
+            denied = self._denied.setdefault(pending.session_id, set())
+            denied.add(pending.tool_name)
+            logger.info(
+                "Tool %s denied for session %s — caching for this turn",
+                pending.tool_name, pending.session_id,
+            )
 
         pending.future.set_result(approved)
         return True

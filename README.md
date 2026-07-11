@@ -226,6 +226,167 @@ open-ant ingest ./docs/report.pdf -w $ANT_WORKSPACE
 
 ---
 
+## 🐧 部署到 Linux
+
+### 环境要求
+
+- Ubuntu 22.04+ / Debian 12+ / Rocky 9+（或其他 systemd-based 发行版）
+- Python 3.12+（系统包管理器通常版本较老，推荐 `deadsnakes` PPA 或 `pyenv`）
+
+```bash
+# Ubuntu 安装 Python 3.12
+sudo add-apt-repository ppa:deadsnakes/ppa -y
+sudo apt install python3.12 python3.12-venv python3.12-dev -y
+```
+
+### 推荐部署拓扑
+
+```
+                     Internet
+                        │
+                ┌───────┴───────┐
+                │  nginx / caddy │  ← 反向代理 + TLS 终结
+                │  :443 (https)  │
+                └───────┬───────┘
+                        │
+                ┌───────┴───────┐
+                │  open-ant      │  ← uvicorn :8000 (127.0.0.1)
+                │  systemd 守护  │
+                └───────┬───────┘
+                        │
+                ┌───────┴───────┐
+                │  ~/open-ant-   │
+                │  workspace/    │  ← 用户数据（config、agents、history）
+                └───────────────┘
+```
+
+open-ant **只监听 127.0.0.1**（默认），由反向代理处理 TLS 和公网暴露。不要直接绑定 `0.0.0.0`。
+
+### 安装步骤
+
+```bash
+# 1. 创建专用用户
+sudo useradd -m -s /bin/bash open-ant
+sudo su - open-ant
+
+# 2. 克隆仓库
+git clone https://github.com/Fair-Fair-Fair/open-ant.git
+cd open-ant
+
+# 3. 创建虚拟环境
+python3.12 -m venv .venv
+source .venv/bin/activate
+
+# 4. 安装
+pip install --upgrade pip
+pip install -e .
+
+# 5. 创建 workspace（见 Quick Start 第 2 步）
+mkdir ~/open-ant-workspace
+# ... 创建 config.user.yaml + agents/ ...
+
+# 6. 验证启动
+open-ant server -w ~/open-ant-workspace
+# 看到 "WebSocket server started on 127.0.0.1:8000" 即成功，Ctrl+C 退出
+```
+
+### systemd 服务
+
+创建 `/etc/systemd/system/open-ant.service`：
+
+```ini
+[Unit]
+Description=Open-Ant Agent Runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=open-ant
+Group=open-ant
+WorkingDirectory=/home/open-ant/open-ant
+Environment=PATH=/home/open-ant/open-ant/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/open-ant/open-ant/.venv/bin/open-ant server -w /home/open-ant/open-ant-workspace
+Restart=always
+RestartSec=5
+
+# 安全加固
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/open-ant/open-ant-workspace
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启动：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now open-ant
+sudo systemctl status open-ant
+```
+
+### Nginx 反向代理
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name ant.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/ant.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/ant.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 300s;   # Agent 响应可能很慢
+    }
+}
+```
+
+WebSocket 需要的 `Upgrade` 和 `Connection` header 已经包含在内。
+
+### 运维命令速查
+
+```bash
+# 查看日志
+sudo journalctl -u open-ant -f
+
+# 重启
+sudo systemctl restart open-ant
+
+# 更新代码
+sudo su - open-ant
+cd open-ant
+git pull
+source .venv/bin/activate
+pip install -e .
+sudo systemctl restart open-ant
+
+# 健康检查
+curl http://127.0.0.1:8000/api/agents
+```
+
+### Linux 注意事项
+
+| 点 | 说明 |
+|----|------|
+| **Shell** | `create_subprocess_shell` 在 Linux 使用 `/bin/sh`，与 bash tool 的命名无关 |
+| **Sandbox 命令** | 危险命令正则在 Linux 下全部生效（`sudo`、`rm -rf /`、`chmod 777` 等） |
+| **ChromaDB** | 首次启动自动在 workspace 下创建 `.memory/`，需确保磁盘有空间 |
+| **文件权限** | workspace 目录需对 `open-ant` 用户可读写（`chmod 700 ~/open-ant-workspace`） |
+| **防火墙** | 仅需开放 443（nginx），8000 端口不对外暴露 |
+| **日志** | 应用日志写 workspace 下的 `.logs/` 目录，systemd 日志通过 journald 捕获 |
+
+---
+
 # ✨ 核心亮点
 
 ## 🛡 安全三角：Sandbox + Guardrails + ContextGuard
@@ -299,6 +460,31 @@ Agent: bash("cat config.user.yaml")
 | **PathSandbox** | 文件读写 | 路径白名单 + glob 黑名单（配置、密钥、内部状态） |
 | **CommandSandbox** | Shell 执行 | 危险命令正则 (18条，跨Unix/Windows) + 文件路径交叉验证 + 超时 + 输出截断 |
 | **NetworkSandbox** | 网络请求 | SSRF 防护 (私有IP阻止) + 域名白/黑名单 + scheme 限制 |
+
+#### Docker 容器沙箱（`backend: docker`）
+
+启用后，`bash` 工具不再直接调用 `asyncio.create_subprocess_shell`，而是 `docker run --rm` 在隔离容器中执行：
+
+```
+docker run --rm \
+  --network none \                       # 无网络
+  --memory 256m --cpus 1.0 \             # 资源限制
+  --read-only \                          # 根文件系统只读
+  -v /host/workspace:/workspace-ro:ro \  # 真实 workspace 只读快照
+  --mount type=volume,source=... \       # 会话级可写副本
+  -v {volume}:/workspace \
+  open-ant-sandbox sh -c "<command>"
+```
+
+**Copy-on-Start 架构**：容器启动时 entrypoint 从 `/workspace-ro`（只读快照）复制到 `/workspace`（Docker volume）。同一会话内所有 bash 调用共享该 volume——修改跨调用持久。真实 workspace 文件从未被触碰。
+
+**隔离保证**：
+- 文件系统：容器内 `rm -rf /` 只删 volume 副本，`/workspace-ro` 始终只读
+- 网络：`--network none`，`curl` / `wget` 全部失败
+- 资源：`--memory` / `--cpus` 限制，超限被 OOM killer 杀死
+- 进程：非 root 用户 (`sandbox`)，`--read-only` 根文件系统
+
+**远程 Docker**：支持通过 `docker_url: ssh://user@host` 连接远程 Docker daemon，配合 `docker_workspace_path` 指定远端 workspace 路径。
 
 ### Guardrails：输入输出内容护栏
 
@@ -404,7 +590,7 @@ Identity(AGENT.md) → Soul(SOUL.md) → Bootstrap → Runtime → Channel Hint 
 | ⚡ Worker Runtime | Agent / Channel / Delivery / Cron | ✅ |
 | 🤖 Agent Runtime | Session 管理 + Tool Calling | ✅ |
 | 🔀 Routing Engine | 三层正则路由 | ✅ |
-| 🛡 **Sandbox** | Path / Command / Network 三层动作边界 | ✅ |
+| 🛡 **Sandbox** | Path / Command / Network + Docker 容器隔离 | ✅ |
 | 🧱 **Guardrails** | InputGuard (注入检测+混合脚本+NFKC) + OutputGuard (脱敏+warn/strip/block) | ✅ |
 | 🔒 **ToolGovernance** | 权限控制 + 调用限额 + 审计日志 | ✅ |
 | 🛑 **Human-in-the-Loop** | `require_confirmation` UI 审批流 + 30s 超时自动拒绝 | ✅ |
@@ -435,7 +621,7 @@ Identity(AGENT.md) → Soul(SOUL.md) → Bootstrap → Runtime → Channel Hint 
 | **Human-in-the-Loop** | `require_confirmation` 工具的 UI 审批流——高权限操作必须人类确认，30s 超时自动拒绝 | ✅ |
 | **Tool Result Injection Hardening** | `scan_tool_result` 支持 warn / strip / block 三种模式；混合脚本检测（Latin+Cyrillic 同形字）；NFKC Unicode 规范化 | ✅ |
 | **Guardrail Evasion Testing** | 34 个对抗用例覆盖 9 类绕过技术：Unicode 同形字、零宽字符、文本分段、大小写、分隔符变体、上下文填充、多语言 —— 检测率 76% | ✅ |
-| **Container Sandbox** | Docker/nsjail 进程级隔离，替代启发式命令解析——真正的 shell 安全 | 🔜 |
+| **Container Sandbox** | Docker 容器隔离 — Copy-on-Start 架构（ro 快照 + 会话级 Docker volume），bash 命令在临时容器内执行，对主机零影响 | ✅ |
 | **Session Leak Fix** | 被 Guardrail 阻断的消息不再持久化到会话历史——防止 LLM 在后续轮次"补答"被拒问题 | ✅ |
 | **Production Error Messages** | 面向用户返回通用安全提示，不再泄露内部正则模式；详细匹配日志仅写入服务端 | ✅ |
 

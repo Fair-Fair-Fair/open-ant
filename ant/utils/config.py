@@ -139,6 +139,36 @@ class CommandSandboxConfig(BaseModel):
     working_dir: str | None = None
     """Restrict command working directory. ``None`` = workspace root."""
 
+    # ── Docker container sandbox ──
+    backend: Literal["host", "docker"] = "docker"
+    """Execution backend. ``host`` = native subprocess (current behaviour).
+    ``docker`` = isolated container with ``docker run --rm``."""
+    docker_image: str = "open-ant-sandbox"
+    """Docker image name for the sandbox container."""
+    docker_url: str | None = None
+    """Docker daemon URL. ``None`` = local daemon via ``docker`` CLI.
+    Set to ``ssh://user@host`` for a remote Docker host."""
+    network_mode: str = "none"
+    """Container network mode. ``none`` = completely isolated (recommended)."""
+    memory_limit: str = "256m"
+    """Memory limit for the container (e.g. ``128m``, ``512m``)."""
+    cpu_limit: float = Field(default=1.0, ge=0.1, le=8.0)
+    """CPU limit for the container (cores)."""
+    read_only_rootfs: bool = True
+    """Mount the container root filesystem as read-only."""
+    tmpfs_size: str = "64m"
+    """Size of the writable ``/tmp`` tmpfs mount."""
+    workspace_mount_mode: Literal["ro", "rw"] = "rw"
+    """How the workspace directory is mounted inside the container.
+    ``ro`` = read-only (recommended — the agent cannot modify real files via bash)."""
+    docker_workspace_path: str | None = None
+    """Path to the workspace *on the Docker host*.  Only needed when using
+    a remote Docker daemon (``docker_url`` is set) and the workspace needs
+    to be bind-mounted into the container.
+
+    Example: if your workspace is at ``/root/open-ant-workspace`` on the
+    remote VM, set this to ``/root/open-ant-workspace``."""
+
 
 class NetworkSandboxConfig(BaseModel):
     """Outbound HTTP(S) restrictions for the agent sandbox."""

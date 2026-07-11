@@ -182,7 +182,17 @@ class PathSandbox:
 
 # Regex patterns that block shell commands.  Compiled at import time so
 # the cost is paid once.  All matching is case-insensitive.
-_DEFAULT_BLOCKED_COMMAND_PATTERNS: list[str] = [
+# Docker-mode blocked patterns:
+# The workspace is a tmpfs COPY (see entrypoint.sh) — the real
+# workspace is mounted read-only at /workspace-ro and never modified.
+# Only patterns that can harm the Docker *host* (e.g. fork bomb)
+# need to be blocked.  Everything else is contained.
+_DOCKER_BLOCKED_PATTERNS: list[str] = [
+    r":\(\)\s*\{",                             # fork bomb — exhausts host PIDs
+]
+
+# Host-mode blocked patterns: every command runs on the real host.
+_HOST_BLOCKED_COMMAND_PATTERNS: list[str] = [
     # Unix / cross-platform dangerous patterns
     r"rm\s+(-rf?|--recursive)\s+/",          # rm -rf /
     r"sudo\s+",                                # privilege escalation
@@ -263,12 +273,14 @@ class CommandSandbox:
                 wd = workspace / wd
             self._working_dir = str(wd.resolve())
 
-        # Compile blocked patterns
+        # Compile blocked patterns — Docker and host use different defaults
         raw_patterns: list[str]
         if config.command.blocked_patterns is not None:
             raw_patterns = list(config.command.blocked_patterns)
+        elif config.command.backend == "docker":
+            raw_patterns = list(_DOCKER_BLOCKED_PATTERNS)
         else:
-            raw_patterns = list(_DEFAULT_BLOCKED_COMMAND_PATTERNS)
+            raw_patterns = list(_HOST_BLOCKED_COMMAND_PATTERNS)
 
         self._blocked: list[re.Pattern[str]] = [
             re.compile(p, re.IGNORECASE) for p in raw_patterns
@@ -282,6 +294,19 @@ class CommandSandbox:
         # to prevent bypasses like 'cat config.user.yaml'.
         self._path_sandbox = path_sandbox
 
+        # ── Docker container sandbox ──
+        self._backend = config.command.backend
+        self._docker_image = config.command.docker_image
+        self._docker_url = config.command.docker_url
+        self._network_mode = config.command.network_mode
+        self._memory_limit = config.command.memory_limit
+        self._cpu_limit = config.command.cpu_limit
+        self._read_only_rootfs = config.command.read_only_rootfs
+        self._tmpfs_size = config.command.tmpfs_size
+        self._workspace_mount_mode = config.command.workspace_mount_mode
+        self._docker_workspace_path = config.command.docker_workspace_path
+        self._workspace = workspace.resolve()
+
     # -- public API ----------------------------------------------------------
 
     @property
@@ -291,6 +316,25 @@ class CommandSandbox:
     @property
     def working_dir(self) -> str:
         return self._working_dir
+
+    @property
+    def backend(self) -> str:
+        return self._backend
+
+    async def destroy_session_volume(self, session_id: str) -> None:
+        """Remove the Docker volume for *session_id* (cleanup on session end)."""
+        volume_name = f"open-ant-sandbox-{session_id}"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "volume", "rm", volume_name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            if proc.returncode == 0:
+                logger.info("Removed Docker volume: %s", volume_name)
+        except Exception:
+            logger.debug("Failed to remove Docker volume %s", volume_name, exc_info=True)
 
     def validate_command(self, command: str) -> None:
         """Raise SandboxViolation if *command* is dangerous or accesses blocked files."""
@@ -313,7 +357,11 @@ class CommandSandbox:
         # Validate file path arguments against PathSandbox.
         # This prevents shell from being used as an escape hatch to read
         # blocked files (e.g. 'cat config.user.yaml' when read_file is denied).
-        if self._path_sandbox is not None:
+        #
+        # Skip in Docker mode: commands run inside a container where paths
+        # refer to the container filesystem, not the host.  The ro mount
+        # and network isolation provide the real security boundary.
+        if self._path_sandbox is not None and self._backend != "docker":
             self._validate_file_args(command)
 
     def _validate_file_args(self, command: str) -> None:
@@ -360,6 +408,171 @@ class CommandSandbox:
             f"[Truncated — original output was {len(output):,} chars, "
             f"limit is {self._max_output:,} chars]"
         )
+
+    async def execute_in_docker(
+        self, command: str, session_id: str
+    ) -> tuple[str, str]:
+        """Execute *command* inside an isolated Docker container.
+
+        Returns ``(stdout, stderr)``.
+
+        Raises ``SandboxViolation`` if Docker is unavailable, the container
+        exits with a non-zero code, or any other Docker error occurs.
+
+        The container is:
+          - ephemeral (``--rm`` — destroyed after execution)
+          - network-isolated (``--network none`` by default)
+          - memory- and CPU-limited
+          - running as a non-root user
+          - mounting the workspace read-only
+        """
+        if not self._enabled:
+            raise SandboxViolation(
+                "Command sandbox is disabled", violation_type="command",
+            )
+
+        import shlex
+
+        # Build docker run arguments
+        args: list[str] = ["docker"]
+
+        if self._docker_url:
+            args.extend(["-H", self._docker_url])
+
+        args.extend([
+            "run", "--rm",
+            "--network", self._network_mode,
+            "--memory", self._memory_limit,
+            "--cpus", str(self._cpu_limit),
+            "--tmpfs", "/tmp",
+            "--stop-timeout", "3",
+        ])
+
+        # Workspace: Copy-on-Start with session-level persistence.
+        #   /workspace-ro  ← bind-mounted real workspace (read-only)
+        #   /workspace     ← named Docker volume (persists across bash
+        #                     calls within the same session)
+        #
+        # entrypoint.sh copies /workspace-ro → /workspace only on the
+        # FIRST call (when the volume is empty).  Subsequent calls see
+        # the accumulated state — rm in one call sticks for the next.
+        workspace_host_path: str | None = None
+        if not self._docker_url:
+            workspace_host_path = str(self._workspace)
+        elif self._docker_workspace_path:
+            workspace_host_path = self._docker_workspace_path
+
+        volume_name = f"open-ant-sandbox-{session_id}"
+        if workspace_host_path:
+            args.extend([
+                "-v", f"{workspace_host_path}:/workspace-ro:ro",
+                "--mount", f"type=volume,source={volume_name},target=/workspace",
+            ])
+        else:
+            args.extend(["--mount", f"type=volume,source={volume_name},target=/workspace"])
+
+        args.extend(["--workdir", "/workspace"])
+
+        if self._read_only_rootfs:
+            args.append("--read-only")
+
+        args.append(self._docker_image)
+        args.append("sh")
+        args.append("-c")
+        args.append(command)
+
+        # Use shlex.quote to log the command safely
+        logger.info(
+            "Docker sandbox: image=%s network=%s mem=%s cpu=%s mount=%s cmd=%s",
+            self._docker_image, self._network_mode,
+            self._memory_limit, self._cpu_limit,
+            self._workspace_mount_mode, shlex.quote(command)[:200],
+        )
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            raise SandboxViolation(
+                "Docker is not installed or not available on this system. "
+                "Install Docker or switch sandbox.command.backend to 'host'.",
+                violation_type="command",
+            )
+        except PermissionError:
+            raise SandboxViolation(
+                "Permission denied accessing Docker. Ensure the current user "
+                "is in the 'docker' group or set DOCKER_HOST correctly.",
+                violation_type="command",
+            )
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(), timeout=self._timeout,
+            )
+        except asyncio.TimeoutError:
+            # Kill the docker subprocess — this terminates the container
+            # and Docker's --rm flag handles cleanup.
+            try:
+                process.kill()
+            except Exception:
+                pass
+            raise SandboxViolation(
+                f"Command timed out after {self._timeout} seconds "
+                f"(container killed)",
+                violation_type="command",
+                detail=command[:200],
+            )
+
+        returncode = process.returncode
+        stdout = stdout_bytes.decode(errors="replace") if stdout_bytes else ""
+        stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
+
+        if returncode == 137:
+            raise SandboxViolation(
+                "Container was killed by the OOM killer — "
+                f"the command exceeded the {self._memory_limit} memory limit. "
+                "Try reducing the workload or increasing sandbox.command.memory_limit.",
+                violation_type="command",
+                detail=command[:200],
+            )
+
+        if returncode == 125:
+            # 125 = docker daemon error (image missing, invalid args, etc.)
+            hint = ""
+            err_lower = stderr.lower()
+            if "invalid volume" in err_lower:
+                hint = (
+                    "Bind-mounting a host path to a remote Docker daemon "
+                    "is not supported. Set sandbox.command.docker_url to null "
+                    "(local Docker) or omit the workspace mount."
+                )
+            elif "no such image" in err_lower or "pull access denied" in err_lower:
+                hint = (
+                    f"Build the image on the Docker host: "
+                    f"docker build -t {self._docker_image} ."
+                )
+            else:
+                hint = (
+                    f"Check that the image '{self._docker_image}' exists "
+                    f"and Docker is running."
+                )
+            raise SandboxViolation(
+                f"Docker daemon error (exit code 125). {hint} "
+                f"stderr: {stderr[:500]}",
+                violation_type="command",
+            )
+
+        if returncode == 127:
+            return stdout, (
+                f"{stderr}\n"
+                f"[Docker sandbox: command not found. "
+                f"Available: sh, bash, cat, ls, grep, awk, sed, curl, wget, head, tail]"
+            ).strip()
+
+        return stdout, stderr
 
 
 # ---------------------------------------------------------------------------
