@@ -57,7 +57,13 @@ class Trace:
         return span
 
     def summary(self) -> dict[str, Any]:
-        return {
+        # Extract ttft_ms from LLMCallStage span if present
+        ttft_ms = None
+        for s in self.spans:
+            for evt in s.events:
+                if evt.get("name") == "first_token":
+                    ttft_ms = evt.get("attributes", {}).get("ttft_ms")
+        result = {
             "trace_id": self.trace_id,
             "session_id": self.session_id,
             "total_spans": len(self.spans),
@@ -71,6 +77,9 @@ class Trace:
                 for s in self.spans
             ],
         }
+        if ttft_ms is not None:
+            result["ttft_ms"] = ttft_ms
+        return result
 
 
 class ExecutionTracer:

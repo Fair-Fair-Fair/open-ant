@@ -231,6 +231,8 @@ class StreamLLMCallStage(StreamPipelineStage):
         ctx.response_content = ""
         ctx.tool_calls = []
         ctx.stop_reason = ""
+        _first_token = False  # track TTFT within this call
+        _call_start = time.time()
 
         async for chunk in ctx.session.agent.llm.stream_chat(
             ctx.messages, ctx.tool_schemas
@@ -238,6 +240,13 @@ class StreamLLMCallStage(StreamPipelineStage):
             event_type = chunk.get("type")
 
             if event_type == "token":
+                if not _first_token:
+                    _first_token = True
+                    ttft_ms = (time.time() - _call_start) * 1000
+                    ctx.metadata["ttft_ms"] = ttft_ms
+                    if span:
+                        span.add_event("first_token", {"ttft_ms": round(ttft_ms, 1)})
+
                 ctx.response_content += chunk["data"]
                 yield chunk  # forward token to frontend
 
