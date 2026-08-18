@@ -2,7 +2,6 @@
 
 import os
 import logging
-import datetime
 from typing import TYPE_CHECKING
 
 from .base import EmbeddingProvider
@@ -25,10 +24,8 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
 
         model_path = self._resolve_local_cache_path(model_name)
         logger.info(f"Loading sentence-transformers model from: {model_path}")
-        print(datetime.datetime.now(), "Loading sentence-transformers model start")
         self.model = SentenceTransformer(model_path, device=device, local_files_only=True)
         logger.info(f"Loaded sentence-transformers model: {model_name} on {device}")
-        print(datetime.datetime.now(), "Loaded sentence-transformers model done")
 
     @staticmethod
     def _resolve_local_cache_path(model_name: str) -> str:

@@ -96,7 +96,7 @@ cat > ~/open-ant-workspace/config.user.yaml << 'EOF'
 llm:
   provider: deepseek
   model: deepseek/deepseek-chat
-  api_key: sk-your-api-key-here
+  api_key: sk-REPLACE_ME
   api_base: https://api.deepseek.com
 default_agent: my-agent
 EOF

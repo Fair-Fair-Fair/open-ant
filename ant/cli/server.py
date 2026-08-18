@@ -3,7 +3,10 @@
 import asyncio
 
 import typer
+from rich.console import Console
+from rich.text import Text
 
+from ant.ui.logo import print_logo
 from ant.core.context import SharedContext
 from ant.server.server import Server
 from ant.utils.logging import setup_logging
@@ -15,8 +18,23 @@ def server_command(ctx: typer.Context) -> None:
 
     setup_logging(config, console_output=True)
 
-    typer.echo("Starting ant server...")
-    typer.echo("Press Ctrl+C to stop")
+    console = Console()
+    print_logo(console)
+    console.print(
+        Text(
+            f"workspace: {config.workspace}  ·  model: {config.llm.model}",
+            style="dim",
+        )
+    )
+
+    # Warn about sandbox/tool consistency before anything runs.
+    from ant.core.sandbox import CommandSandbox
+
+    sandbox = CommandSandbox(config.sandbox, config.workspace)
+    for warning in sandbox.startup_warnings():
+        console.print(f"[yellow]⚠ {warning}[/yellow]")
+
+    console.print("\nStarting workers... Press Ctrl+C to stop\n")
 
     try:
         context = SharedContext(config)

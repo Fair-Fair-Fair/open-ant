@@ -1,5 +1,6 @@
-"""CLI interface for my-bot."""
+"""CLI interface for open-ant.
 
-from ant.cli.main import app
-
-__all__ = ["app"]
+Deliberately import-free: `python -m ant.cli.main` warns (runpy) when the
+package eagerly imports its own module, and `open-ant`/`python -m ant`
+don't need it.
+"""

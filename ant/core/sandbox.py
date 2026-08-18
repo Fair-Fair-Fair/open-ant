@@ -321,6 +321,45 @@ class CommandSandbox:
     def backend(self) -> str:
         return self._backend
 
+    def startup_warnings(self) -> list[str]:
+        """Return warnings about bash/file-tool consistency mismatches.
+
+        The file tools (read/write/edit) always operate on the local
+        filesystem, while ``bash`` follows ``backend``.  These two worlds
+        only line up when open-ant runs on the machine that owns the
+        workspace — warn loudly otherwise.
+        """
+        warnings: list[str] = []
+        if self._backend != "docker":
+            return warnings
+
+        if self._docker_url:
+            if self._docker_workspace_path:
+                warnings.append(
+                    f"sandbox.command.backend=docker with remote daemon "
+                    f"({self._docker_url}): bash executes against "
+                    f"'{self._docker_workspace_path}' on the Docker host, but "
+                    f"read/write/edit operate on the local workspace. The two "
+                    f"copies must be kept in sync manually, or set "
+                    f"backend: host for local-first use."
+                )
+            else:
+                warnings.append(
+                    f"sandbox.command.backend=docker with remote daemon "
+                    f"({self._docker_url}): no docker_workspace_path set, so "
+                    f"bash starts with an EMPTY workspace and cannot see your "
+                    f"files at all. Set backend: host for local-first use, or "
+                    f"run open-ant on the Docker host."
+                )
+        else:
+            warnings.append(
+                "sandbox.command.backend=docker (local daemon): bash runs in "
+                "ephemeral containers with the workspace mounted read-only — "
+                "files created via bash do NOT persist to your real workspace. "
+                "Set backend: host for local-first use."
+            )
+        return warnings
+
     async def destroy_session_volume(self, session_id: str) -> None:
         """Remove the Docker volume for *session_id* (cleanup on session end)."""
         volume_name = f"open-ant-sandbox-{session_id}"

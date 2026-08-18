@@ -13,7 +13,7 @@ class Worker(ABC):
 
     def __init__(self, context: "SharedContext"):
         self.context = context
-        self.logger = logging.getLogger(f"mybot.server.{self.__class__.__name__}")
+        self.logger = logging.getLogger(f"ant.server.{self.__class__.__name__}")
         self._task: asyncio.Task | None = None
 
     @abstractmethod
