@@ -101,7 +101,11 @@ class MemoryGraph:
             raise MemoryGraphError("MemoryGraph is closed")
         try:
             async with self._driver.session(database=self._database) as session:
-                return await session.run(query, **params)
+                result = await session.run(query, **params)
+                # Result 绑定 session 生命周期：必须在 async with 内消费完，
+                # 返回记录列表。旧实现退出 session 后才迭代 Result，
+                # 真驱动抛 ResultConsumedError（假 session 单测测不出）。
+                return [record async for record in result]
         except MemoryGraphError:
             raise
         except Exception as exc:
@@ -153,8 +157,8 @@ class MemoryGraph:
             "session_id": memory.get("session_id") or "",
             "entities": normalize_entities(memory.get("entities", [])),
         }
-        result = await self._run(query, params)
-        async for record in result:
+        records = await self._run(query, params)
+        for record in records:
             return record.get("memory_id") or memory_id
         return memory_id
 
@@ -195,10 +199,10 @@ class MemoryGraph:
             "candidate_time": candidate.get("updated_at") or _iso_now(),
             "limit": CONFLICT_LOOKBACK,
         }
-        result = await self._run(query, params)
+        records = await self._run(query, params)
 
         conflicts: list[dict] = []
-        async for record in result:
+        for record in records:
             conflicts.append(
                 {
                     "memory_id": record.get("memory_id"),
@@ -255,11 +259,11 @@ class MemoryGraph:
                newer.updated_at AS updated_at,
                'MEMORY' AS kind, 'SUPERSEDES' AS rel_type
         """
-        result = await self._run(query, {"ids": ids})
+        records = await self._run(query, {"ids": ids})
 
         items: list[dict] = []
         seen: set[tuple[str, str]] = set()
-        async for record in result:
+        for record in records:
             kind = record.get("kind")
             rel_type = record.get("rel_type")
             if kind == "ENTITY":
@@ -324,13 +328,13 @@ class MemoryGraph:
         SET m.archived = true
         RETURN count(m) AS archived_count
         """
-        result = await self._run(
+        records = await self._run(
             query,
             {
                 "min_importance": _safe_int(min_importance, 1),
                 "cutoff": cutoff,
             },
         )
-        async for record in result:
+        for record in records:
             return int(record.get("archived_count") or 0)
         return 0

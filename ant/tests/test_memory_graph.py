@@ -384,6 +384,13 @@ def _neo4j_credentials() -> dict:
             ("database", "neo4j_database"),
         ):
             value = getattr(infra, attr, None)
+            # InfraSettings 的 neo4j_* 是方法（pydantic 禁止字段与方法同名），
+            # 拿到的是 bound method 时必须调用；其他实现可能是普通属性。
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:
+                    value = None
             if value:
                 creds[name] = value
     except Exception:
@@ -399,9 +406,10 @@ def _neo4j_credentials() -> dict:
     return creds
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture  # function 级：pytest-asyncio 默认循环是 function 级，
+# module 级 fixture 会跨事件循环复用 driver（neo4j 6.x 严格绑定循环 → RuntimeError）
 async def aura_graph():
-    """Real-Aura MemoryGraph; module skipped when unconfigured/unreachable."""
+    """Real-Aura MemoryGraph; skipped when unconfigured/unreachable."""
     creds = _neo4j_credentials()
     if not all(creds.get(k) for k in ("uri", "username", "password")):
         pytest.skip("Neo4j credentials not configured in .env")
