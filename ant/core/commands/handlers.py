@@ -16,7 +16,9 @@ class SessionCommand(Command):
     description = "Show current session details"
 
     async def execute(self, args: str, session: "AgentSession") -> str:
-        info = session.shared_context.history_store.get_session_info(session.session_id)
+        info = await session.shared_context.history_store.get_session_info(
+            session.session_id
+        )
 
         # Handle case where session not found in index
         created_str = info.created_at if info else "Unknown"

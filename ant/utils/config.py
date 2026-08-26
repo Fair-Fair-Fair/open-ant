@@ -130,6 +130,25 @@ class ApiConfig(BaseModel):
     port: int = Field(default=8000, gt=0, lt=65536)
 
 
+# ── Phase 1 infra backend selection ────────────────────────────────────
+
+
+class StorageConfig(BaseModel):
+    """Conversation history storage backend."""
+
+    backend: Literal["mysql", "jsonl"] = "mysql"
+    """mysql = MySQL via asyncmy (production default); requires .env
+    credentials; jsonl = legacy JSONL files (dev / tests)."""
+
+
+class BusConfig(BaseModel):
+    """Event bus transport backend."""
+
+    backend: Literal["rabbitmq", "memory"] = "rabbitmq"
+    """rabbitmq = aio-pika AMQP (production default); memory = in-process
+    EventBus pub/sub (dev / tests)."""
+
+
 # ── Sandbox configuration ───────────────────────────────────────────────
 
 
@@ -292,6 +311,11 @@ class Config(BaseModel):
     default_delivery_source: str | None = None
     # 10-websocket
     api: ApiConfig = Field(default_factory=ApiConfig)
+
+    # Phase 1 infra: storage (mysql|jsonl) + bus (rabbitmq|memory).
+    # Defaults are the production defaults.
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    bus: BusConfig = Field(default_factory=BusConfig)
 
     # 11-multi-agent-routing
     routing: dict = Field(default_factory=lambda: {"bindings": []})

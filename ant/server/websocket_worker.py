@@ -120,7 +120,7 @@ class WebSocketWorker(SubscribeWorker):
                     continue
                 # ─────────────────────────────────────
 
-                event = self._normalize_message(msg)
+                event = await self._normalize_message(msg)
 
                 await self.context.eventbus.publish(event)
                 self.logger.debug(f"Emitted InboundEvent from WebSocket: {msg.source}")
@@ -140,11 +140,11 @@ class WebSocketWorker(SubscribeWorker):
                 self.logger.error(f"Unexpected error in client loop: {e}")
                 break
 
-    def _normalize_message(self, msg: "WebsocketMessage") -> InboundEvent:
+    async def _normalize_message(self, msg: "WebsocketMessage") -> InboundEvent:
         """Normalize WebSocketMessage to InboundEvent."""
         source = WebSocketEventSource(user_id=msg.source)
 
-        session_id = self._get_or_create_session_id(source)
+        session_id = await self._get_or_create_session_id(source)
 
         return InboundEvent(
             session_id=session_id,
@@ -153,7 +153,7 @@ class WebSocketWorker(SubscribeWorker):
             timestamp=time.time(),
         )
 
-    def _get_or_create_session_id(self, source: "EventSource") -> str:
+    async def _get_or_create_session_id(self, source: "EventSource") -> str:
         """Get or create session ID for a given source."""
         source_str = str(source)
 
@@ -163,7 +163,7 @@ class WebSocketWorker(SubscribeWorker):
 
         agent_def = self.context.agent_loader.load(self.context.config.default_agent)
         agent = Agent(agent_def, self.context)
-        session = agent.new_session(source)
+        session = await agent.new_session(source)
 
         # Cache the session
         self.context.config.set_runtime(

@@ -8,9 +8,12 @@ Phase 0 (improve.md §4): 把 §3 里"下次必崩"的配置问题变成"启动�
   (d) docker 可用性（仅 sandbox.command.backend=docker 时）
   (e) 磁盘剩余空间（workspace 所在盘）
   (f) history 目录可读写
+  (g) MySQL 连通性（仅 storage.backend=mysql 时；真实 SELECT 1）
+  (h) RabbitMQ 连通性（仅 bus.backend=rabbitmq 时；真实连接）
 退出码非 0 表示存在 error（供脚本当 pre-flight 门禁用）。
 """
 
+import asyncio
 import logging
 import re
 import shutil
@@ -21,12 +24,19 @@ from typing import Any
 import typer
 from rich.console import Console
 from rich.table import Table
+from sqlalchemy import text
 
+from ant.bus.rabbitmq import RabbitMqBus
 from ant.core.agent_loader import AgentLoader
 from ant.core.routing import Binding
+from ant.storage.db import create_engine
 from ant.utils.config import Config
+from ant.utils.settings import InfraSettings
 
 logger = logging.getLogger(__name__)
+
+# 真实探活超时（秒）——避免对不可达主机挂起过久
+PROBE_TIMEOUT_SECONDS = 5.0
 
 console = Console()
 
@@ -145,6 +155,81 @@ def check_history_rw(history_path: Path) -> tuple[bool, str]:
     return read_back == "ok", f"history dir {history_path} readable/writable"
 
 
+def _classify_mysql_error(exc: Exception) -> str:
+    """把底层连接异常归成人类可读的失败类别（不泄露 DSN/密码）。"""
+    msg = str(exc)
+    lowered = msg.lower()
+    if "access denied" in lowered or "1045" in msg:
+        return "auth"
+    if "can't connect" in lowered or "2003" in msg or "2002" in msg:
+        return "unreachable"
+    if "unknown database" in lowered or "1049" in msg:
+        return "database-missing"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "timeout"
+    return "error"
+
+
+async def check_mysql(settings: InfraSettings | None = None) -> tuple[bool, str]:
+    """MySQL 连通性检查（仅 storage.backend=mysql 时调用）。
+
+    凭据不完整 → ERROR（回退 JSONL）；否则真实 async connect + SELECT 1，
+    失败时报失败类别 + 具体错误（不打码问题），成功时报告 host:port。
+    *settings* 可注入假对象供单测（纯函数）。
+    """
+    settings = settings or InfraSettings()
+    dsn = settings.mysql_dsn()
+    if dsn is None:
+        return False, "未配置 MySQL 凭据（.env），回退 JSONL"
+    engine = create_engine(dsn)
+    try:
+        try:
+            async with engine.connect() as conn:
+                await asyncio.wait_for(
+                    conn.execute(text("SELECT 1")), PROBE_TIMEOUT_SECONDS
+                )
+        except asyncio.TimeoutError:
+            return (
+                False,
+                f"MySQL timeout: no response within {PROBE_TIMEOUT_SECONDS}s",
+            )
+        except Exception as exc:
+            return False, f"MySQL {_classify_mysql_error(exc)}: {exc}"
+    finally:
+        await engine.dispose()
+    return True, f"connected to open_ant@{settings.mysql_host}:{settings.mysql_port}"
+
+
+async def check_rabbitmq(settings: InfraSettings | None = None) -> tuple[bool, str]:
+    """RabbitMQ 连通性检查（仅 bus.backend=rabbitmq 时调用）。
+
+    凭据不完整 → ERROR（回退内存总线）；否则真实连接
+    （``RabbitMqBus.start()`` 连接失败会抛异常）。成功时报告 host:port。
+    *settings* 可注入假对象供单测（纯函数）。
+    """
+    settings = settings or InfraSettings()
+    url = settings.rabbitmq_url()
+    if url is None:
+        return False, "未配置 RabbitMQ 凭据（.env），回退内存总线"
+    bus = RabbitMqBus(url)
+    try:
+        try:
+            await asyncio.wait_for(bus.start(), PROBE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return (
+                False,
+                f"RabbitMQ timeout: no response within {PROBE_TIMEOUT_SECONDS}s",
+            )
+        except Exception as exc:
+            return False, f"RabbitMQ connection failed: {exc}"
+    finally:
+        try:
+            await bus.stop()
+        except Exception:
+            pass
+    return True, f"connected to rabbitmq@{settings.rabbitmq_host}:{settings.rabbitmq_port}"
+
+
 def doctor_command(ctx: typer.Context) -> None:
     """运行启动自检并输出汇总表；存在 error 时退出码非 0。"""
     workspace: Path = ctx.obj["workspace"]
@@ -185,12 +270,32 @@ def doctor_command(ctx: typer.Context) -> None:
 
         # (f) history 目录可读写
         results.append(("history dir", *check_history_rw(config.history_path)))
+
+        # (g) MySQL 连通性（仅 storage.backend=mysql 时真实探活）
+        if config.storage.backend == "mysql":
+            results.append(("mysql", *asyncio.run(check_mysql())))
+        else:
+            results.append(
+                ("mysql", None,
+                 f"skipped (storage.backend={config.storage.backend!r})")
+            )
+
+        # (h) RabbitMQ 连通性（仅 bus.backend=rabbitmq 时真实探活）
+        if config.bus.backend == "rabbitmq":
+            results.append(("rabbitmq", *asyncio.run(check_rabbitmq())))
+        else:
+            results.append(
+                ("rabbitmq", None,
+                 f"skipped (bus.backend={config.bus.backend!r})")
+            )
     else:
         for name, reason in (
             ("routing bindings", "skipped (config failed)"),
             ("default agent", "skipped (config failed)"),
             ("docker", "skipped (config failed)"),
             ("history dir", "skipped (config failed)"),
+            ("mysql", "skipped (config failed)"),
+            ("rabbitmq", "skipped (config failed)"),
         ):
             results.append((name, None, reason))
 

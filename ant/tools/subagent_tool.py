@@ -76,7 +76,7 @@ def create_subagent_dispatch_tool(
 
         agent = Agent(agent_def, shared_context)
         agent_source = AgentEventSource(agent_id=current_agent_id)
-        agent_session = agent.new_session(agent_source)
+        agent_session = await agent.new_session(agent_source)
         session_id = agent_session.session_id
 
         user_message = task

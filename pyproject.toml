@@ -20,6 +20,12 @@ dependencies = [
     "watchdog>=3.0.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
+    # Phase 1 infra: storage (MySQL) + bus (RabbitMQ)
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncmy>=0.2.9",
+    "alembic>=1.13",
+    "aio-pika>=9.4",
+    "pydantic-settings>=2.2",
 ]
 
 # Optional integrations — install what you need:
@@ -35,7 +41,7 @@ all = [
     "sentence-transformers>=2.2",
     "crawl4ai>=0.4",
 ]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4", "mypy>=1.10"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4", "mypy>=1.10", "aiosqlite>=0.20"]
 
 [build-system]
 requires = ["hatchling"]

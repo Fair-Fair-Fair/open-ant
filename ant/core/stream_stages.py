@@ -173,7 +173,7 @@ class StreamContextBuildStage(StreamPipelineStage):
         # continuations within the same turn.
         if ctx.iteration == 0:
             user_msg: dict = {"role": "user", "content": ctx.user_message}
-            ctx.session.state.add_message(user_msg)
+            await ctx.session.state.add_message(user_msg)
 
         ctx.messages = ctx.session.state.build_messages()
 
@@ -385,11 +385,11 @@ class StreamToolExecutionStage(StreamPipelineStage):
                     for tc in ctx.tool_calls
                 ],
             }
-            ctx.session.state.add_message(assistant_msg)
+            await ctx.session.state.add_message(assistant_msg)
 
             # Record each tool result
             for tc, result in zip(ctx.tool_calls, tool_results):
-                ctx.session.state.add_message({
+                await ctx.session.state.add_message({
                     "role": "tool",
                     "content": result,
                     "tool_call_id": tc.id,
@@ -485,7 +485,7 @@ class StreamTerminalStage(StreamPipelineStage):
             # (Tool-call assistant messages are saved in StreamToolExecutionStage;
             # this catches the final text-only response.)
             if ctx.response_content.strip():
-                ctx.session.state.add_message({
+                await ctx.session.state.add_message({
                     "role": "assistant",
                     "content": ctx.response_content,
                 })

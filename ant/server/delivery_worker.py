@@ -1,9 +1,6 @@
 """Worker that delivers outbound messages to pltforms"""
 
-import asyncio
 import logging
-import random
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 from ant.core.events import EventSource, OutboundEvent
@@ -16,25 +13,6 @@ if TYPE_CHECKING:
     from ant.core.context import SharedContext
 
 logger = logging.getLogger(__name__)
-
-
-# Retry configuration
-BACKOFF_MS = [5000, 25000, 120000, 600000]  # 5s, 25s, 2min, 10min
-MAX_RETRIES = 5
-
-
-def compute_backoff_ms(retry_count: int) -> int:
-    """Compute backoff time with jitter"""
-    if retry_count <= 0:
-        return 0
-
-    # Cap at last backoff value
-    idx = min(retry_count - 1, len(BACKOFF_MS) - 1)
-    base = BACKOFF_MS[idx]
-
-    # Add +/- 20% jitter
-    jitter = random.randint(-base // 5, base // 5)
-    return max(0, base + jitter)
 
 
 # platform message size limit
@@ -81,40 +59,46 @@ def chunk_message(content: str, limit: int) -> list[str]:
 
 
 class DeliveryWorker(SubscribeWorker):
-    """Worker that delivers outbound messages to platforms"""
+    """Worker that delivers outbound messages to platforms.
+
+    Delivery semantics (Phase 1, design principle "投递失败 = 不确认"):
+      * rabbitmq backend — single delivery attempt; any failure (channel
+        missing, reply error) RAISES so the broker wrapper nacks the
+        message → DLX retry.  Success needs no explicit ack (RabbitMqBus
+        acks automatically when the handler returns normally).
+      * memory backend — Phase 0 semantics: failure leaves the event
+        unacked (the pending file survives for restart redelivery);
+        success acks explicitly.
+    """
+
     def __init__(self, context: "SharedContext"):
         super().__init__(context)
         self.context.eventbus.subscribe(OutboundEvent, self.handle_event)
         self.logger.info("DeliveryWorker subscribed to OUTBOUND events")
 
-    async def _deliver_with_retry(
-            self, chunks: list[str], source: "EventSource", channel: "Channel[Any]"
-    ) -> bool:
-        """Deliver all chunks with retry logic. Retuns True on success"""
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                for chunk in chunks:
-                    await channel.reply(chunk, source)
-                return True
-            except Exception as e:
-                if attempt < MAX_RETRIES:
-                    backoff_ms = compute_backoff_ms(attempt)
-                    self.logger.warning(
-                        f"Delivery failed (attempt {attempt}/{MAX_RETRIES}), "
-                        f"retrying in {backoff_ms}ms: {e}"
-                    )
-                    await asyncio.sleep(backoff_ms / 1000)
-                else:
-                    self.logger.error(
-                        f"Delivery failed after {MAX_RETRIES} attempts: {e}"
-                    )
-                    return False
-        return False
+    @property
+    def _is_rabbitmq(self) -> bool:
+        return self.context.bus_backend == "rabbitmq"
 
-    @lru_cache(maxsize=10)
-    def _get_session_source(self, session_id: str) -> HistorySession | None:
-        """Get session info from HistoryStore(cached"""
-        for session in self.context.history_store.list_sessions():
+    async def _deliver(
+            self, chunks: list[str], source: "EventSource", channel: "Channel[Any]"
+    ) -> None:
+        """Deliver all chunks in a single attempt; raises on failure.
+
+        Phase 1: broker-level retry (nack → DLX) replaces the old in-process
+        backoff loop, which used to sleep the whole bus for up to 10 minutes
+        on one failing message.
+        """
+        for chunk in chunks:
+            await channel.reply(chunk, source)
+
+    async def _get_session_source(self, session_id: str) -> HistorySession | None:
+        """Get session info from the history repository.
+
+        Note: no lru_cache here — it cannot wrap an async method (it would
+        cache the coroutine object and break on the second call).
+        """
+        for session in await self.context.history_store.list_sessions():
             if session.id == session_id:
                 return session
         return None
@@ -151,7 +135,7 @@ class DeliveryWorker(SubscribeWorker):
     async def handle_event(self, event: OutboundEvent) -> None:
         """Handle an outbound message event"""
         try:
-            session_info = self._get_session_source(event.session_id)
+            session_info = await self._get_session_source(event.session_id)
 
             if not session_info or not session_info.source:
                 self.logger.warning(
@@ -172,6 +156,12 @@ class DeliveryWorker(SubscribeWorker):
 
             channel = self._get_channel(source.platform_name)
             if not channel:
+                if self._is_rabbitmq:
+                    # rabbitmq: raise → broker nack → DLX retry (the
+                    # channel may come back up later).
+                    raise RuntimeError(
+                        f"No channel for platform {source.platform_name}"
+                    )
                 # 找不到对应平台的 channel：不 ack，保留持久化文件，重启后由 _recover 重新投递
                 self.logger.error(
                     f"No channel for platform {source.platform_name}, event "
@@ -179,22 +169,18 @@ class DeliveryWorker(SubscribeWorker):
                 )
                 return
 
-            success = await self._deliver_with_retry(chunks, source, channel)
-            if not success:
-                # 投递失败：不 ack（Phase 0 临时方案，Phase 1 将替换为 DLQ），
-                # 持久化文件保留，事件总线重启时 _recover 会重新投递
-                self.logger.error(
-                    f"Delivery failed after {MAX_RETRIES} attempts, event "
-                    f"[session={event.session_id} ts={event.timestamp} "
-                    f"content={event.content[:50]!r}] left unacked for redelivery"
-                )
-                return
-
-            self.context.eventbus.ack(event)
+            await self._deliver(chunks, source, channel)
+            if not self._is_rabbitmq:
+                # memory mode: explicit ack deletes the pending file;
+                # rabbitmq mode acks automatically on handler return.
+                await self.context.eventbus.ack(event)
             self.logger.info(
                 f"Delivered message to {source.platform_name} for session {event.session_id}"
             )
         except Exception as e:
+            if self._is_rabbitmq:
+                # 失败即抛出：触发 broker nack → DLX 重试（at-least-once）
+                raise
             self.logger.error(f"Failed to deliver message: {e}")
 
     def _get_channel(self, platform: str) -> "Channel[Any] | None":

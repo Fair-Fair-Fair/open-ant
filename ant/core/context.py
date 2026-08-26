@@ -1,16 +1,23 @@
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
+from ant.bus.base import EventBus as EventBusProtocol
+from ant.bus.composite import CompositeBus
+from ant.bus.memory import InMemoryBus
+from ant.bus.rabbitmq import RabbitMqBus
 from ant.channel.base import Channel
 from ant.core.agent_loader import AgentLoader
 from ant.core.commands.registry import CommandRegistry
-from ant.core.eventbus import EventBus
-from ant.core.history import HistoryStore
+from ant.core.events import Event
 from ant.core.skill_loader import SkillLoader
 from ant.utils.config import Config
+from ant.utils.settings import InfraSettings
 
 if TYPE_CHECKING:
     from ant.server.websocket_worker import WebSocketWorker
+    from ant.storage.repository import HistoryRepository
 
 from ant.core.confirmation import ConfirmationBroker
 
@@ -34,6 +41,46 @@ from ant.provider.memory.doc_ingester import DocumentIngester
 logger = logging.getLogger(__name__)
 
 
+def _create_history_store(config: Config) -> "HistoryRepository":
+    """Factory for the history repository (Phase 1).
+
+    Decision rule:
+      * ``config.storage.backend == "mysql"`` AND complete MySQL
+        credentials in ``.env`` (``InfraSettings().mysql_dsn()``) →
+        ``MysqlHistoryRepository`` (production default).
+      * otherwise → ``JsonlHistoryRepository`` over the legacy JSONL
+        files, with an explicit WARNING explaining the fallback.
+
+    The decision is synchronous and never touches the network; the MySQL
+    engine connects lazily on first use.
+    """
+    from ant.storage.repository import JsonlHistoryRepository, MysqlHistoryRepository
+    from ant.utils.settings import InfraSettings
+
+    if config.storage.backend == "mysql":
+        infra = InfraSettings()
+        dsn = infra.mysql_dsn()
+        if dsn is not None:
+            logger.info(
+                "<context>:history_store backend=mysql (host=%s db=%s)",
+                infra.mysql_host,
+                infra.mysql_database,
+            )
+            return MysqlHistoryRepository(dsn)
+        logger.warning(
+            "<context>:history_store backend=mysql but MySQL credentials are "
+            "missing/incomplete in .env — falling back to JSONL history at %s",
+            config.history_path,
+        )
+        return JsonlHistoryRepository(config.history_path)
+
+    logger.info(
+        "<context>:history_store backend=jsonl (config.storage.backend=%r)",
+        config.storage.backend,
+    )
+    return JsonlHistoryRepository(config.history_path)
+
+
 class SharedContext:
     """Global shared state for the application"""
 
@@ -41,8 +88,13 @@ class SharedContext:
     agent_loader: AgentLoader
     skill_loader: SkillLoader
     command_registry: CommandRegistry
-    history_store: HistoryStore
-    eventbus: EventBus
+    history_store: "HistoryRepository"
+    eventbus: EventBusProtocol
+    # Phase 1 bus assembly: effective backend ("rabbitmq" | "memory"),
+    # durable transport, MySQL session factory / DSN (None when not mysql),
+    # and the outbox writer closure (None when not mysql-backed).
+    bus_backend: str
+    outbox_writer: Callable[["Event"], Awaitable[str]] | None
     channels: list[Channel[Any]]
     websocket_worker: 'WebSocketWorker | None'
 
@@ -73,11 +125,24 @@ class SharedContext:
     def __init__(self, config: Config,
                  channels: list[Channel[Any]] | None = None) -> None:
         self.config = config
-        self.history_store = HistoryStore.from_config(config)
+        self.history_store = _create_history_store(config)
         self.agent_loader = AgentLoader.from_config(config)
         self.skill_loader = SkillLoader.from_config(config)
         self.command_registry = CommandRegistry.with_builtins()
-        self.eventbus = EventBus(self)
+
+        # ── Phase 1: event bus assembly ────────────────────────────────
+        # CompositeBus: durable events (Inbound/Outbound/Dispatch/
+        # DispatchResult) go through RabbitMqBus or the MySQL outbox;
+        # transient events (StreamChunk/Confirmation*) always stay in the
+        # in-process InMemoryBus (design principle: streaming tokens never
+        # cross the broker — workspace/plan.md §1).
+        self._durable_bus: EventBusProtocol | None = None
+        self._session_factory: Any = None
+        self._mysql_dsn: str | None = None
+        self._infra_settings: InfraSettings | None = None
+        self.outbox_writer: Callable[["Event"], Awaitable[str]] | None = None
+        self.bus_backend = "memory"
+        self.eventbus = self._assemble_bus(config)
 
         if channels is not None:
             self.channels = channels
@@ -102,6 +167,105 @@ class SharedContext:
 
         # 16 rag-memory
         self._init_memory(config)
+
+    # ── Phase 1: event bus assembly ─────────────────────────────────────
+
+    def _assemble_bus(self, config: Config) -> EventBusProtocol:
+        """Build the CompositeBus for this process.
+
+        Decision rules (mirror of ``_create_history_store``):
+          * ``config.bus.backend == "rabbitmq"`` AND complete RabbitMQ
+            credentials in ``.env`` (``InfraSettings().rabbitmq_url()``) →
+            ``RabbitMqBus`` as the durable transport.
+          * otherwise → ``InMemoryBus`` + a WARNING explaining the fallback.
+          * mysql storage with a MySQL-backed history store → durable
+            events are written through the outbox writer instead.
+
+        Credentials discipline: the RabbitMQ URL embeds the password —
+        never log it; ``InfraSettings.masked_rabbitmq_url()`` exists for
+        user-visible output.
+        """
+        settings = InfraSettings()
+        self._infra_settings = settings
+
+        # Preserve the legacy pending-file location for the memory backend
+        # (crash recovery reads the same directory as the old EventBus).
+        pending_dir = config.event_path / "pending"
+
+        effective = config.bus.backend
+        if config.bus.backend == "rabbitmq":
+            rabbitmq_url = settings.rabbitmq_url()
+            if rabbitmq_url is not None:
+                durable: EventBusProtocol = RabbitMqBus(rabbitmq_url)
+            else:
+                durable = InMemoryBus(pending_dir)
+                effective = "memory"
+                logger.warning(
+                    "<context>:bus.backend=rabbitmq but RabbitMQ credentials "
+                    "are missing/incomplete in .env — falling back to the "
+                    "in-process InMemoryBus (no cross-restart durability)"
+                )
+        else:
+            durable = InMemoryBus(pending_dir)
+            effective = "memory"
+
+        self._durable_bus = durable
+        self.outbox_writer = self._build_outbox_writer(config)
+        self.bus_backend = effective
+        logger.info(
+            "<context>:eventbus assembled backend=%s outbox=%s",
+            effective,
+            self.outbox_writer is not None,
+        )
+        return CompositeBus(durable, self.outbox_writer)
+
+    def _build_outbox_writer(
+        self, config: Config
+    ) -> Callable[["Event"], Awaitable[str]] | None:
+        """Build the outbox writer closure; None when not MySQL-backed.
+
+        The closure opens its own session, enqueues the event into
+        ``outbox_events`` with a fresh ``message_id`` (uuid4 hex) and
+        commits — one transaction, so an event is either fully recorded or
+        not at all.  ``OutboxPublisher`` drains the table to the durable
+        bus afterwards (server startup step (c)).
+
+        The shared MySQL session factory is kept on ``self._session_factory``
+        for the server's OutboxPublisher and the workers' dedup.
+        """
+        if config.storage.backend != "mysql":
+            return None
+        from ant.storage.outbox_ops import enqueue
+        from ant.storage.repository import MysqlHistoryRepository
+
+        if not isinstance(self.history_store, MysqlHistoryRepository):
+            logger.warning(
+                "<context>:storage.backend=mysql but history_store is not "
+                "MySQL-backed — outbox writer disabled"
+            )
+            return None
+
+        # Foundation-built factory owned by MysqlHistoryRepository (no
+        # second connection pool to the same database).
+        session_factory = self.history_store._session_factory
+        self._session_factory = session_factory
+        self._mysql_dsn = self._infra_settings.mysql_dsn()
+
+        async def outbox_writer(event: Event) -> str:
+            message_id = uuid4().hex
+            async with session_factory() as session:
+                # enqueue is synchronous: adds the row to the caller's
+                # session; the commit below lands it (same transaction).
+                enqueue(session, event, message_id)
+                await session.commit()
+            return message_id
+
+        logger.info(
+            "<context>:outbox writer enabled (mysql backend, host=%s db=%s)",
+            self._infra_settings.mysql_host,
+            self._infra_settings.mysql_database,
+        )
+        return outbox_writer
 
     def _init_memory(self, config: Config) -> None:
         """Initialize RAG memory components if enabled."""

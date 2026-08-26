@@ -25,11 +25,11 @@ class SessionState:
     memory_context: str = field(default="")
     _last_extracted_idx: int = field(default=0, repr=False)
 
-    def add_message(self, message: Message) -> None:
+    async def add_message(self, message: Message) -> None:
         """Add message to in-memory list + persist."""
         self.messages.append(message)
         history_msg = HistoryMessage.from_message(message)
-        self.shared_context.history_store.save_message(self.session_id, history_msg)
+        await self.shared_context.history_store.save_message(self.session_id, history_msg)
 
     def build_messages(self) -> list[Message]:
         """Build messages list with system prompt."""

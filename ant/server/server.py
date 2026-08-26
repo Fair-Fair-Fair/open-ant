@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import uvicorn
 
+from ant.storage.db import create_database_if_missing, run_migrations
 from ant.utils.config import ConfigReloader
 
 from .agent_worker import AgentWorker
@@ -19,6 +20,7 @@ from .websocket_worker import WebSocketWorker
 from .worker import Worker
 
 if TYPE_CHECKING:
+    from ant.bus.outbox import OutboxPublisher
     from ant.core.context import SharedContext
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,8 @@ class Server:
         self.context = context
         self.workers: list[Worker] = []
         self._api_task: asyncio.Task | None = None
+        self._outbox_publisher: "OutboxPublisher | None" = None
+        self._outbox_task: asyncio.Task | None = None
         self.config_reloader: ConfigReloader = ConfigReloader(self.context.config)
 
     async def run(self) -> None:
@@ -42,19 +46,93 @@ class Server:
         await self._cleanup_orphan_volumes()
         await self.context.auto_ingest_docs()
 
-        self._setup_workers()
-        self._start_workers()
+        # Phase 1 startup order:
+        # (a) mysql backend → CREATE DATABASE + alembic migrations.
+        await self._bootstrap_storage()
 
-        # Start API server if configured
-        if self.context.config.api:
-            self._api_task = asyncio.create_task(self._run_api())
+        # (b) event bus — a failed connect aborts startup with a clear error.
+        await self._start_bus()
 
         try:
+            # (c) outbox publisher (only when durable events go via the outbox).
+            self._start_outbox_publisher()
+
+            # (d) existing workers
+            self._setup_workers()
+            self._start_workers()
+
+            # Start API server if configured
+            if self.context.config.api:
+                self._api_task = asyncio.create_task(self._run_api())
+
             await self._monitor_workers()
         except asyncio.CancelledError:
             logger.info("Server shutting down...")
-            await self._stop_all()
             raise
+        finally:
+            await self._stop_all()
+
+    async def _bootstrap_storage(self) -> None:
+        """(a) CREATE DATABASE IF NOT EXISTS + alembic upgrade head.
+
+        Only for ``config.storage.backend == "mysql"``; when credentials are
+        missing the history already fell back to JSONL, so there is nothing
+        to bootstrap.
+        """
+        if self.context.config.storage.backend != "mysql":
+            return
+        dsn = self.context._mysql_dsn
+        if dsn is None:
+            logger.warning(
+                "storage.backend=mysql but MySQL credentials are missing — "
+                "history already fell back to JSONL; skipping DB bootstrap"
+            )
+            return
+        await create_database_if_missing(dsn)
+        await run_migrations(dsn)
+        logger.info("MySQL bootstrap complete (database + migrations)")
+
+    async def _start_bus(self) -> None:
+        """(b) Start the event bus; a connect failure aborts startup."""
+        try:
+            await self.context.eventbus.start()
+        except Exception as exc:
+            logger.error("EventBus failed to start: %s", exc)
+            await self._try_stop_bus()
+            raise RuntimeError(
+                f"EventBus ({self.context.bus_backend} backend) failed to "
+                f"start: {exc}"
+            ) from exc
+        logger.info("EventBus started (backend=%s)", self.context.bus_backend)
+
+    async def _try_stop_bus(self) -> None:
+        try:
+            await self.context.eventbus.stop()
+        except Exception:
+            logger.debug("EventBus stop raised", exc_info=True)
+
+    def _start_outbox_publisher(self) -> None:
+        """(c) Start OutboxPublisher when durable events go via the outbox.
+
+        The publisher drains ``outbox_events`` into the durable bus
+        (never the CompositeBus itself — that would re-enter the outbox).
+        """
+        if self.context.outbox_writer is None:
+            return
+        from ant.bus.outbox import OutboxPublisher
+
+        if self.context._session_factory is None:
+            logger.error(
+                "Outbox mode requires a MySQL session factory — "
+                "skipping OutboxPublisher; events stay in the outbox table"
+            )
+            return
+        self._outbox_publisher = OutboxPublisher(
+            session_factory=self.context._session_factory,
+            bus=self.context._durable_bus,
+        )
+        self._outbox_task = asyncio.create_task(self._outbox_publisher.run())
+        logger.info("OutboxPublisher started")
 
     async def _cleanup_orphan_volumes(self) -> None:
         """Best-effort GC for abandoned sandbox Docker volumes.
@@ -89,7 +167,8 @@ class Server:
             session_id = name[len(prefix):]
             if (
                 not session_id
-                or self.context.history_store.get_session_info(session_id) is not None
+                or await self.context.history_store.get_session_info(session_id)
+                is not None
             ):
                 kept += 1
                 continue
@@ -123,8 +202,9 @@ class Server:
         ws_worker = WebSocketWorker(self.context)
         self.context.websocket_worker = ws_worker
 
+        # NOTE: the CompositeBus (self.context.eventbus) is NOT a Worker —
+        # it is started/stopped explicitly in run()/_stop_all.
         self.workers = [
-            self.context.eventbus,  # EventBus (active worker)
             AgentWorker(self.context),  # SubscriberWorker
             DeliveryWorker(self.context),  # SubscriberWorker，
             CronWorker(self.context),  # Background worker for scheduled tasks
@@ -166,13 +246,51 @@ class Server:
             await asyncio.sleep(5)
 
     async def _stop_all(self) -> None:
-        """Stop all workers gracefully."""
+        """Stop everything in reverse startup order.
+
+        Phase 1 order (plan.md §3.7 graceful shutdown):
+        outbox publisher → workers → event bus → uvicorn API task → config
+        reloader.  The API task was never stopped in Phase 0 — cancelled
+        here (uvicorn's serve() exits cleanly on task cancellation).
+        """
+        # (1) outbox publisher first — stop new events entering the bus
+        if self._outbox_publisher is not None:
+            try:
+                await self._outbox_publisher.stop()
+            except Exception:
+                logger.error("OutboxPublisher stop failed", exc_info=True)
+        if self._outbox_task is not None:
+            self._outbox_task.cancel()
+            try:
+                await self._outbox_task
+            except asyncio.CancelledError:
+                pass
+
+        # (2) workers
         for worker in self.workers:
             await worker.stop()
 
-        # Stop config reloader
+        # (3) event bus
+        await self._try_stop_bus()
+
+        # (4) uvicorn API task (Phase 0 leftover — never stopped before)
+        await self._stop_api_task()
+
+        # (5) config reloader
         if self.config_reloader is not None:
             self.config_reloader.stop()
+
+    async def _stop_api_task(self) -> None:
+        """Cancel the uvicorn API task (Phase 0 leftover)."""
+        if self._api_task is None:
+            return
+        self._api_task.cancel()
+        try:
+            await self._api_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.error("API task stop failed", exc_info=True)
 
     async def _run_api(self) -> None:
         """Run the WebSocket API server."""

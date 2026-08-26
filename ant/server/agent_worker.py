@@ -24,6 +24,7 @@ from ant.core.events import (
 )
 from ant.utils.def_loader import DefNotFoundError  # Agent/Skill 定义加载失败的异常
 
+from .dedup import is_processed, mark_processed  # Phase 1: 幂等消费
 from .worker import SubscribeWorker  # 基类：提供事件订阅型 Worker 的基础能力
 
 if TYPE_CHECKING:
@@ -74,8 +75,23 @@ class AgentWorker(SubscribeWorker):
         Args:
             event: 入站事件，包含 session_id、content（用户消息）、retry_count 等字段
         """
+        # Phase 1 幂等消费（仅 rabbitmq 模式）：broker 是 at-least-once 投递，
+        # 崩溃/nack 重投会带上同一个 message_id。已处理过的直接返回——
+        # 订阅包装在 handler 正常返回后自动 ack，重复消息就此消化。
+        # 事件上没有 message_id（如 jsonl 来源或重试副本）时跳过去重。
+        if self.context.bus_backend == "rabbitmq":
+            message_id = getattr(event, "message_id", None)
+            if message_id:
+                if await is_processed(self.context._session_factory, message_id):
+                    self.logger.info(
+                        "Message %s already processed, skipping %s",
+                        message_id,
+                        event.__class__.__name__,
+                    )
+                    return
+
         # 从历史记录存储中获取会话信息，session_info 中包含 agent_id（标识使用哪个 Agent）
-        session_info = self.context.history_store.get_session_info(event.session_id)
+        session_info = await self.context.history_store.get_session_info(event.session_id)
 
         if session_info:
             agent_id = session_info.agent_id
@@ -128,14 +144,16 @@ class AgentWorker(SubscribeWorker):
                 if session_id:
                     try:
                         # 尝试恢复已有会话（加载历史消息上下文）
-                        session = agent.resume_session(session_id)
+                        session = await agent.resume_session(session_id)
                     except ValueError:
                         # 会话不存在（可能是首次对话或历史被清理），创建新会话并绑定原 session_id
                         logger.warning(f"Session {session_id} not found, creating new")
-                        session = agent.new_session(source=event.source, session_id=session_id)
+                        session = await agent.new_session(
+                            source=event.source, session_id=session_id
+                        )
                 else:
                     # 没有 session_id 时创建全新会话，由 Agent 自动生成 session_id
-                    session = agent.new_session(source=event.source)
+                    session = await agent.new_session(source=event.source)
                     session_id = session.session_id
 
                 # ── 斜杠命令优先处理 ──
@@ -195,6 +213,7 @@ class AgentWorker(SubscribeWorker):
                 logger.info(f"Session completed: {session_id}")
 
                 await self._emit_response(event, collected_content, agent_def.id)
+                await self._mark_processed(event)
             except Exception as e:
                 # ── 异常处理与重试机制 ──
                 logger.error(f"Session failed: {e}")
@@ -212,8 +231,28 @@ class AgentWorker(SubscribeWorker):
                 else:
                     # 重试次数已耗尽，向用户返回错误信息
                     await self._emit_response(event, "", agent_def.id, str(e))
+                    await self._mark_processed(event)
 
         self._maybe_cleanup_semaphores(agent_def)
+
+    async def _mark_processed(self, event: ProcessableEvent) -> None:
+        """Phase 1 幂等：把 message_id 记入 processed_messages。
+
+        仅 rabbitmq 模式 + MySQL 后端有意义；jsonl 模式（无共享注册表）
+        是 no-op。记录失败只记日志、不致命——它是尽力而为的记账，
+        真实投递语义由 broker 的 ack/nack 保证。
+        """
+        if self.context.bus_backend != "rabbitmq":
+            return
+        message_id = getattr(event, "message_id", None)
+        if not message_id:
+            return
+        try:
+            await mark_processed(self.context._session_factory, message_id)
+        except Exception as e:
+            self.logger.warning(
+                "Failed to mark message %s processed: %s", message_id, e
+            )
 
     async def _emit_stream_chunk(
         self,

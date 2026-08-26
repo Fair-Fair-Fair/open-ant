@@ -113,7 +113,7 @@ class Agent:
         # Default to 80% of 200k context
         return 160000
 
-    def new_session(
+    async def new_session(
         self,
         source: EventSource,
         session_id: str | None = None,
@@ -145,16 +145,16 @@ class Agent:
             tools=tools,
         )
 
-        self.context.history_store.create_session(
+        await self.context.history_store.create_session(
             self.agent_def.id, session_id, source
         )
         return session
 
-    def resume_session(self, session_id: str) -> "AgentSession":
+    async def resume_session(self, session_id: str) -> "AgentSession":
         """Load an existing conversation session."""
         session_query = [
             session
-            for session in self.context.history_store.list_sessions()
+            for session in await self.context.history_store.list_sessions()
             if session.id == session_id
         ]
         if not session_query:
@@ -164,7 +164,7 @@ class Agent:
         source = session_info.get_source()
 
         # Get all messages (no max_history limit)
-        history_messages = self.context.history_store.get_messages(session_id)
+        history_messages = await self.context.history_store.get_messages(session_id)
 
         # Convert HistoryMessage to litellm Message format
         messages: list[Message] = [msg.to_message() for msg in history_messages]

@@ -101,7 +101,7 @@ def create_app(context: SharedContext) -> FastAPI:
             return JSONResponse({"messages": []})
 
         session_id = source_session.session_id
-        history_msgs = context.history_store.get_messages(session_id)
+        history_msgs = await context.history_store.get_messages(session_id)
 
         # Build a tool_call_id → name mapping from assistant messages
         tool_names: dict[str, str] = {}

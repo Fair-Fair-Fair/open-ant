@@ -15,20 +15,37 @@ from ant.utils.def_loader import DefNotFoundError
 # ─────────────────────────── 假对象 ───────────────────────────
 
 class FakeEventBus:
-    """记录 publish/ack 调用的假事件总线"""
+    """记录 publish/ack 调用的假事件总线。
+
+    Phase 1 起满足 ant.bus.base.EventBus 协议：publish/ack/nack/start/stop
+    均为 async，subscribe/unsubscribe 为同步。
+    """
 
     def __init__(self):
         self.published = []
         self.acked = []
+        self.nacked = []
 
     def subscribe(self, event_class, handler):
+        pass
+
+    def unsubscribe(self, handler):
         pass
 
     async def publish(self, event):
         self.published.append(event)
 
-    def ack(self, event):
+    async def ack(self, event):
         self.acked.append(event)
+
+    async def nack(self, event, requeue=False):
+        self.nacked.append(event)
+
+    async def start(self):
+        pass
+
+    async def stop(self):
+        pass
 
 
 class FakeSession:
@@ -44,13 +61,15 @@ class FakeSession:
 
 
 class FakeHistoryStore:
+    """Async HistoryRepository 协议的测试替身（Phase 1 全部方法为 async）"""
+
     def __init__(self, sessions):
         self._sessions = sessions
 
-    def list_sessions(self):
+    async def list_sessions(self):
         return list(self._sessions)
 
-    def get_session_info(self, session_id):
+    async def get_session_info(self, session_id):
         for session in self._sessions:
             if session.id == session_id:
                 return session
@@ -76,13 +95,15 @@ class FakeChannel:
 class FakeContext:
     """DeliveryWorker/AgentWorker 依赖的最小上下文"""
 
-    def __init__(self, channels=None, sessions=None):
+    def __init__(self, channels=None, sessions=None, bus_backend="memory"):
         self.eventbus = FakeEventBus()
         self.channels = channels or []
         self.history_store = FakeHistoryStore(sessions or [])
         self.config = FakeConfig()
         self.routing_table = _FakeRouting()
         self.agent_loader = _FakeAgentLoader()
+        self.bus_backend = bus_backend
+        self._session_factory = None
 
     def make_delivery_worker(self):
         return DeliveryWorker(self)

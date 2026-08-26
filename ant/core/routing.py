@@ -82,13 +82,15 @@ class RoutingTable:
                 return binding.agent
         return self.context.config.default_agent
 
-    def get_or_create_session_id(self, source: EventSource) -> str:
+    async def get_or_create_session_id(self, source: EventSource) -> str:
         """Get existing or create new session_id source"""
         source_str = str(source)
 
         source_session = self.context.config.sources.get(source_str)
         if source_session:
-            existing = self.context.history_store.get_session_info(source_session.session_id)
+            existing = await self.context.history_store.get_session_info(
+                source_session.session_id
+            )
             if existing:
                 return source_session.session_id
             logger = logging.getLogger(__name__)
@@ -98,7 +100,7 @@ class RoutingTable:
         agent_id = self.resolve(source_str)
         agent_def = self.context.agent_loader.load(agent_id)
         agent = Agent(agent_def, self.context)
-        session = agent.new_session(source)
+        session = await agent.new_session(source)
 
         #Cache the session
         self.context.config.set_runtime(

@@ -173,7 +173,7 @@ class _FakeAgent:
     def __init__(self, agent_def, shared_context):
         self.agent_def = agent_def
 
-    def new_session(self, source):
+    async def new_session(self, source):
         return types.SimpleNamespace(session_id="sub-session-1")
 
 

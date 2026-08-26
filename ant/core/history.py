@@ -1,21 +1,26 @@
-"""JSONL file-based conversation history backend."""
+"""Legacy JSONL conversation history backend (Phase 0).
+
+Phase 1: the pydantic schemas moved to ``ant.storage.schemas``; this
+module keeps them re-exported for backward compatibility and retains
+the synchronous ``HistoryStore`` JSONL implementation, which is adapted
+to the async ``HistoryRepository`` protocol by
+``ant.storage.repository.JsonlHistoryRepository``.
+"""
 
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
-from litellm.types.completion import ChatCompletionMessageParam as Message
-from pydantic import BaseModel, Field, field_validator
+from ant.storage.schemas import (
+    MAX_PERSISTED_TOOL_CHARS,  # noqa: F401  (re-exported for compat)
+    HistoryMessage,  # noqa: F401  (re-exported for compat)
+    HistorySession,  # noqa: F401  (re-exported for compat)
+)
 
 if TYPE_CHECKING:
     from ant.utils.config import Config
 
-from ant.core.events import EventSource
-
-# Tool results are truncated before persistence to prevent context bloat.
-# The LLM uses the full result in the current turn; future turns only need
-# a brief reference (title + URL, which the first ~500 chars capture).
-MAX_PERSISTED_TOOL_CHARS = 500
+__all__ = ["HistoryStore", "HistoryMessage", "HistorySession", "MAX_PERSISTED_TOOL_CHARS"]
 
 
 def _now_iso() -> str:
@@ -23,94 +28,13 @@ def _now_iso() -> str:
     return datetime.now().isoformat()
 
 
-class HistorySession(BaseModel):
-    """Session metadata - stored in index.jsonl."""
-
-    id: str
-    agent_id: str
-    source: str # Serialized EventSource (e.g., "platform-telegram:123:456")
-    title: str | None = None
-    message_count: int = 0
-    created_at: str
-    updated_at: str
-
-    @field_validator("source", mode="before")
-    @classmethod
-    def parse_source(cls, v: Any) -> str:
-        if hasattr(v, "__str__"):
-            return str(v)
-        return v
-
-    def get_source(self) -> EventSource:
-        """Get the session's Eventsource"""
-        return EventSource.from_string(self.source)
-
-
-class HistoryMessage(BaseModel):
-    """Single message - stored in session.jsonl."""
-
-    timestamp: str = Field(default_factory=_now_iso)
-    role: Literal["user", "assistant", "system", "tool"]
-    content: str
-    tool_calls: list[dict[str, Any]] | None = None
-    tool_call_id: str | None = None
-
-    @classmethod
-    def from_message(cls, message: Message) -> "HistoryMessage":
-        """Create HistoryMessage from litellm Message format.
-
-        Tool results are truncated to ``MAX_PERSISTED_TOOL_CHARS`` to prevent
-        storage bloat and context pollution on session resume.  The full
-        content is used by the LLM in the current turn; future turns only
-        need a brief reference.
-        """
-        tool_calls = None
-        if message.get("tool_calls"):
-            tool_calls = [
-                {
-                    "id": tc.get("id"),
-                    "type": tc.get("type", "function"),
-                    "function": tc.get("function", {}),
-                }
-                for tc in message["tool_calls"]
-            ]
-
-        tool_call_id = message.get("tool_call_id")
-
-        content = str(message.get("content", ""))
-        if message.get("role") == "tool" and len(content) > MAX_PERSISTED_TOOL_CHARS:
-            content = content[:MAX_PERSISTED_TOOL_CHARS] + "…"
-
-        return cls(
-            role=message["role"],
-            content=content,
-            tool_calls=tool_calls,
-            tool_call_id=tool_call_id,
-        )
-
-    def to_message(self) -> Message:
-        """Convert HistoryMessage to litellm Message format."""
-        base: dict[str, Any] = {
-            "role": self.role,
-            "content": self.content,
-        }
-
-        if self.role == "assistant" and self.tool_calls:
-            return {
-                "role": "assistant",
-                "content": self.content,
-                "tool_calls": self.tool_calls,
-            }
-
-        if self.role == "tool" and self.tool_call_id:
-            base["tool_call_id"] = self.tool_call_id
-            return base
-
-        return base
-
-
 class HistoryStore:
-    """JSONL file-based history storage."""
+    """JSONL file-based history storage.
+
+    Legacy Phase 0 implementation — synchronous, file based.  New code
+    should go through ``HistoryRepository`` (see
+    ``ant.storage.repository``) instead of calling this directly.
+    """
 
     @staticmethod
     def from_config(config: "Config") -> "HistoryStore":
@@ -160,7 +84,7 @@ class HistoryStore:
         return -1
 
     def create_session(self, agent_id: str, session_id: str,
-                       source: "EventSource") -> dict[str, Any]:
+                       source: "Any") -> dict[str, Any]:
         """Create a new conversation session."""
         now = _now_iso()
         session = HistorySession(

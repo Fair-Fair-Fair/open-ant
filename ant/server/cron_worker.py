@@ -66,7 +66,7 @@ class CronWorker(Worker):
             agent_def = self.context.agent_loader.load(cron_def.agent)
             agent = Agent(agent_def, self.context)
             cron_source = CronEventSource(cron_id=cron_def.id)
-            session = agent.new_session(cron_source)
+            session = await agent.new_session(cron_source)
 
             event = DispatchEvent(
                 session_id=session.session_id,
