@@ -11,6 +11,7 @@ import logging
 import time
 from typing import Any
 
+from ant.core.guardrails import _INJECTION_BLOCKED_MSG, StreamRedactor
 from ant.core.session_fsm import SessionPhase
 from ant.core.stream_pipeline import StreamPipelineStage
 
@@ -45,6 +46,81 @@ def _try_transition(fsm, phase: SessionPhase) -> None:
         fsm.transition_to(phase)
     except ValueError as exc:
         logger.debug("FSM transition skipped: %s", exc)
+
+
+def _build_stream_redactor(shared_context) -> "StreamRedactor | None":
+    """Build the streaming secret redactor for one LLM call, or None (直通).
+
+    None when: guardrails disabled, output guard missing, secret redaction
+    disabled on the output guard, or ``redact_buffer_chars`` == 0 (config
+    passthrough mode — tokens flow unchanged).  ``redact_buffer_chars`` is
+    read from ``config.guardrails.output`` via getattr (the field is added
+    by the config/auth workstream in parallel; 128 is the fallback default).
+    """
+    if shared_context is None:
+        return None
+    guardrails = getattr(shared_context, "guardrails", None)
+    output = getattr(guardrails, "output", None) if guardrails is not None else None
+    if output is None:
+        return None
+    if not getattr(output, "_enabled", True):
+        return None
+    if not getattr(output, "_redact_secrets", True):
+        return None
+
+    config = getattr(shared_context, "config", None)
+    output_cfg = (
+        getattr(getattr(config, "guardrails", None), "output", None)
+        if config is not None
+        else None
+    )
+    buffer_size = (
+        getattr(output_cfg, "redact_buffer_chars", 128)
+        if output_cfg is not None
+        else 128
+    )
+    if buffer_size is None:
+        buffer_size = 128
+    try:
+        buffer_size = int(buffer_size)
+    except (TypeError, ValueError):
+        buffer_size = 128
+    if buffer_size <= 0:
+        return None  # 直通：不建 redactor，token 原样转发
+    return StreamRedactor.from_output_guard(output, buffer_size=buffer_size)
+
+
+def _resolve_judge_llm(ctx) -> Any:
+    """Shared LLM for the injection judge — ``summarize_model`` preferred.
+
+    优先用配置里的轻量模型（``config.llm.summarize_model``，getattr 兜底），
+    未配置时回落 session 主模型（``session.agent.llm``）。任何解析失败都
+    回退主模型（原则 11：降级不炸链）。
+    """
+    session = ctx.session
+    agent = getattr(session, "agent", None)
+    fallback_llm = getattr(agent, "llm", None) if agent is not None else None
+
+    shared_context = getattr(session, "shared_context", None)
+    config = getattr(shared_context, "config", None) if shared_context is not None else None
+    llm_config = getattr(config, "llm", None) if config is not None else None
+    small_model = (
+        getattr(llm_config, "summarize_model", None) if llm_config is not None else None
+    )
+    if not small_model:
+        return fallback_llm
+    try:
+        from ant.provider.llm import LLMProvider
+
+        return LLMProvider.from_config(
+            llm_config.model_copy(update={"model": small_model})
+        )
+    except Exception:  # noqa: BLE001 — fall back to the main model
+        logger.debug(
+            "Judge LLM resolution failed — falling back to the main model",
+            exc_info=True,
+        )
+        return fallback_llm
 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +166,13 @@ class StreamValidationStage(StreamPipelineStage):
 class StreamInputGuardStage(StreamPipelineStage):
     """Validate and sanitize user input before it reaches the LLM context.
 
-    Three layers (in order):
+    Layers (in order):
       1. Sanitize control characters
       2. Check message length
-      3. Detect prompt injection patterns
+      3. Detect prompt injection patterns (regex)
+      4. Optional LLM-judge re-check (config.guardrails.input.judge_enabled)
+         — only when the regex layer found nothing; UNSAFE verdicts are
+         handled with the same block_injection semantics as regex hits.
 
     Short-circuits with an error event on violation — the pipeline never
     reaches the LLM for a malicious or malformed message.
@@ -124,8 +203,33 @@ class StreamInputGuardStage(StreamPipelineStage):
                 yield {"type": "error", "data": msg}
                 return
 
-            # 3. Detect prompt injection
+            # 3. Detect prompt injection (regex 层)
             clean, pattern, msg = input_guard.detect_injection(ctx.user_message)
+
+            # ── Phase 4C: LLM-judge 复核层（注入检测第三层） ──
+            # regex 未命中时由 judge 复核语义级注入（regex 命中直接拦，
+            # judge 只查 regex 漏网的）。InputGuard.detect_injection 是同步
+            # 的，judge 是 async —— 所以在这里（stage）await 调用。
+            if clean:
+                judge = getattr(guardrails, "judge", None)
+                if judge is not None and ctx.user_message.strip():
+                    llm = _resolve_judge_llm(ctx)
+                    judged_safe = await judge.check(ctx.user_message, llm)
+                    if not judged_safe:
+                        # 与 regex 命中同权处理：block_injection 决定拦/放
+                        logger.warning("LLM judge flagged user message as unsafe")
+                        if span:
+                            span.add_event("injection_blocked", {"pattern": "llm_judge"})
+                        _finish_span(span, "ok")
+                        if getattr(input_guard, "_block_injection", True):
+                            yield {"type": "error", "data": _INJECTION_BLOCKED_MSG}
+                            return
+                        # Audit mode — log but don't block
+                        logger.info(
+                            "Judge-flagged message allowed through "
+                            "(block_injection=False)"
+                        )
+
             if not clean:
                 if span:
                     span.add_event("injection_blocked", {"pattern": pattern})
@@ -231,6 +335,14 @@ class StreamLLMCallStage(StreamPipelineStage):
     this stage records ``tool_calls`` / ``stop_reason`` on *ctx* and
     chains to the downstream stages (ToolExecution → Terminal) so they
     can emit status, tool_result, and the final done event.
+
+    Phase 4C streaming redaction (安全 P0 #12): every token passes through
+    a :class:`~ant.core.guardrails.StreamRedactor` (one per LLM call) —
+    ``data`` is fed first, only the non-empty safe part is yielded, and the
+    remaining buffer is flushed (redacted) before the error/done events
+    (先 flush 补尾，后 done).  ``redact_buffer_chars`` == 0 disables the
+    redactor entirely (直通).  ``ctx.response_content`` accumulates the
+    *redacted* text so persisted history matches what the user saw.
     """
 
     async def execute(self, ctx, next):
@@ -242,6 +354,12 @@ class StreamLLMCallStage(StreamPipelineStage):
         ctx.stop_reason = ""
         _first_token = False  # track TTFT within this call
         _call_start = time.time()
+
+        # ── Phase 4C 流式脱敏（安全 P0 #12：token 先出后审 → 延迟换覆盖） ──
+        # 每个 LLM 调用建一个 redactor：token 先 feed 再 yield 非空部分，
+        # done/error 前 flush 剩余缓冲并 yield 补尾。redact_buffer_chars=0
+        # 时直通（不建 redactor，token 原样转发）。
+        redactor = _build_stream_redactor(ctx.session.shared_context)
 
         async for chunk in ctx.session.agent.llm.stream_chat(
             ctx.messages, ctx.tool_schemas
@@ -256,8 +374,17 @@ class StreamLLMCallStage(StreamPipelineStage):
                     if span:
                         span.add_event("first_token", {"ttft_ms": round(ttft_ms, 1)})
 
-                ctx.response_content += chunk["data"]
-                yield chunk  # forward token to frontend
+                token_data = chunk["data"]
+                safe = (
+                    redactor.feed(token_data)
+                    if redactor is not None
+                    else token_data
+                )
+                ctx.response_content += safe
+                if safe:
+                    # 空返回 = 整段 token 仍被缓冲（未过 buffer_size 或
+                    # 跨 chunk 密钥被压住），等 flush 时再补尾。
+                    yield {"type": "token", "data": safe}
 
             elif event_type == "tool_calls":
                 ctx.tool_calls = chunk["data"]
@@ -300,9 +427,23 @@ class StreamLLMCallStage(StreamPipelineStage):
                 ctx.stop_reason = "error"
                 if span:
                     span.add_event("llm_error", {"error": chunk.get("data")})
+                # 先 flush 剩余缓冲（已脱敏）并 yield 补尾，再转发 error。
+                if redactor is not None:
+                    tail = redactor.flush()
+                    if tail:
+                        ctx.response_content += tail
+                        yield {"type": "token", "data": tail}
                 _finish_span(span, "error")
                 yield chunk  # forward error to frontend
                 return       # don't chain downstream on error
+
+        # 流结束：flush 剩余缓冲并 yield 补尾，之后才链到下游
+        # （done 事件由 TerminalStage 发出 —— 先 flush 后 done）。
+        if redactor is not None:
+            tail = redactor.flush()
+            if tail:
+                ctx.response_content += tail
+                yield {"type": "token", "data": tail}
 
         _finish_span(span, "ok")
 

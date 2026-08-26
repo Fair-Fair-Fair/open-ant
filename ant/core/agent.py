@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 # stream output support
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable, Dict
 
 import litellm
 from litellm.types.completion import (
@@ -55,6 +55,74 @@ if TYPE_CHECKING:
     from ant.provider.llm import LLMToolCall
 
 
+def _looks_like_secret(value: str) -> bool:
+    """Heuristic for credential-shaped values (audit redaction).
+
+    A value is treated as a secret when it is long (> 20 chars) and
+    contains '=' (key=value style) or the word "token".
+    """
+    if len(value) <= 20:
+        return False
+    return "=" in value or "token" in value.lower()
+
+
+def _redact_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Redact credential-shaped *args* values before persisting an audit row.
+
+    Top-level string values matching ``_looks_like_secret`` are replaced
+    with "[REDACTED]".  Nested structures are kept as-is (top-level
+    heuristic by design).
+    """
+    return {
+        key: "[REDACTED]" if isinstance(value, str) and _looks_like_secret(value) else value
+        for key, value in args.items()
+    }
+
+
+def _make_audit_sink(
+    session_factory: Any,
+    session_id: str,
+) -> Callable[[dict[str, Any]], Awaitable[None]]:
+    """Build the MySQL ``audit_log`` sink for one session (Phase 4E).
+
+    The sink is bound to *session_id* (governance is rebuilt per session
+    in ``_build_tools``, so the closure naturally carries that session's
+    id) and appends one ``audit_log`` row per tool call through a fresh
+    session.  Best-effort by design: any failure is logged, never raised —
+    the caller already runs us fire-and-forget (see
+    ``ToolGovernance.record_call``).  jsonl mode has no session factory and
+    never calls this.
+    """
+    from ant.storage.models import AuditLogRecord
+
+    async def audit_sink(entry: dict[str, Any]) -> None:
+        try:
+            async with session_factory() as session:
+                session.add(
+                    AuditLogRecord(
+                        session_id=session_id,
+                        event_type="tool_call",
+                        payload={
+                            "tool": entry.get("tool"),
+                            "args": _redact_args(entry.get("args") or {}),
+                            "result_preview": entry.get("result_preview", ""),
+                            "elapsed": entry.get("elapsed", 0.0),
+                        },
+                    )
+                )
+                await session.commit()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "audit_log write failed (session=%s tool=%s); tool call is "
+                "unaffected",
+                session_id,
+                entry.get("tool"),
+                exc_info=True,
+            )
+
+    return audit_sink
+
+
 class Agent:
     """A configured agent that creates and manages conversation sessions."""
 
@@ -63,8 +131,15 @@ class Agent:
         self.context = context
         self.llm = LLMProvider.from_config(agent_def.llm)
 
-    def _build_tools(self, include_post_message: bool) -> ToolRegistry:
-        """Build a ToolRegistry with tools appropriate for the session."""
+    def _build_tools(
+        self, include_post_message: bool, session_id: str | None = None
+    ) -> ToolRegistry:
+        """Build a ToolRegistry with tools appropriate for the session.
+
+        *session_id* (optional) binds the governance audit sink to one
+        session: ``_build_tools`` is invoked per session, so each
+        governance gets a sink closure carrying that session's id.
+        """
         # Build ToolGovernance if a tool_policy is configured on this agent.
         # Lazy import to avoid circular dependency: agent.py → registry →
         # sandbox → core.__init__ → agent.py.
@@ -74,6 +149,15 @@ class Agent:
         if self.agent_def.tool_policy:
             policy = ToolPolicy(**self.agent_def.tool_policy)
             governance = ToolGovernance(policy)
+            # Phase 4E audit persistence: MySQL-backed storage (session
+            # factory present) gets a sink writing each recorded call into
+            # the audit_log table; jsonl mode keeps the in-memory audit
+            # only.  Governance is per-session (rebuilt on every call),
+            # so the sink closure is bound to this session's id.
+            if session_id and getattr(self.context, "_session_factory", None) is not None:
+                governance.set_audit_sink(
+                    _make_audit_sink(self.context._session_factory, session_id)
+                )
 
         registry = ToolRegistry.with_builtins(governance=governance)
 
@@ -148,7 +232,7 @@ class Agent:
         session_id = session_id or str(uuid.uuid4())
 
         include_post_message = source.is_cron
-        tools = self._build_tools(include_post_message)
+        tools = self._build_tools(include_post_message, session_id)
 
         # Create context guard for this session
         context_guard = ContextGuard(
@@ -197,7 +281,7 @@ class Agent:
 
         include_post_message = source.is_cron
         # Build tools for resumed session
-        tools = self._build_tools(include_post_message)
+        tools = self._build_tools(include_post_message, session_info.id)
 
         # Create context guard
         context_guard = ContextGuard(

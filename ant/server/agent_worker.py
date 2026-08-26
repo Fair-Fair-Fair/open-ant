@@ -56,6 +56,20 @@ class AgentWorker(SubscribeWorker):
 
         self._semaphores: dict[str, asyncio.Semaphore] = {}
 
+        # ── Phase 4E: session task registry (worker-side subagent
+        # cancellation).  Keyed by the *spawning* session: for a
+        # DispatchEvent (subagent run) that is its parent_session_id, so
+        # cancelling a session finds and cancels every subagent task it
+        # spawned in O(1).  Main-session tasks (InboundEvent, no parent)
+        # are keyed by their own session_id.
+        #
+        # Cancellation boundary: the registry is per-process.  In rabbitmq
+        # mode (multi-worker / multi-process) a subagent may run in another
+        # process and its task is invisible here — cross-process cancellation
+        # is not possible.  The cascade only covers the single-process model
+        # (memory/jsonl backends or one local worker).
+        self._session_tasks: dict[str, set[asyncio.Task]] = {}
+
         # 在事件总线中订阅 InboundEvent 类型的事件，回调函数为 dispatch_event
         # 每当有用户消息等入站事件时，都会触发 dispatch_event
         self.context.eventbus.subscribe(InboundEvent, self.dispatch_event)
@@ -118,7 +132,8 @@ class AgentWorker(SubscribeWorker):
         # 以异步任务方式启动会话执行
         # 使用 create_task 而非 await，使事件分发不被阻塞，可以立即处理下一个事件
         # 注意这里是 create_task 而非 await，这意味着 dispatch_event 会瞬间返回，不会阻塞 EventBus 的事件分发循环。  # noqa: E501
-        asyncio.create_task(self.exec_session(event, agent_def))
+        task = asyncio.create_task(self.exec_session(event, agent_def))
+        self._register_session_task(event, task)
 
     async def exec_session(self, event: ProcessableEvent, agent_def: "AgentDef") -> None:
         """执行一次完整的 Agent 会话
@@ -214,6 +229,17 @@ class AgentWorker(SubscribeWorker):
 
                 await self._emit_response(event, collected_content, agent_def.id)
                 await self._mark_processed(event)
+            except asyncio.CancelledError:
+                # ── 级联取消（Phase 4E）──
+                # 本会话任务被取消（用户中断 / 上游级联取消）：先取消以本
+                # 会话为 parent 的子代理任务（它们在 _session_tasks 里按
+                # parent_session_id 注册），再清理 semaphore 注册，最后
+                # re-raise。边界：注册表是本进程内的——rabbitmq 多 worker
+                # 模式下子代理可能运行在别的进程，无法跨进程取消（见
+                # __init__ 里 _session_tasks 的说明）。
+                self._cancel_subagent_tasks(session_id)
+                self._maybe_cleanup_semaphores(agent_def)
+                raise
             except Exception as e:
                 # ── 异常处理与重试机制 ──
                 logger.error(f"Session failed: {e}")
@@ -234,6 +260,56 @@ class AgentWorker(SubscribeWorker):
                     await self._mark_processed(event)
 
         self._maybe_cleanup_semaphores(agent_def)
+
+    def _register_session_task(self, event: ProcessableEvent, task: asyncio.Task) -> None:
+        """Register *task* in ``_session_tasks`` under its spawning session.
+
+        Subagent runs (DispatchEvent) carry the spawning session in
+        ``parent_session_id``; main-session runs (InboundEvent) have no
+        parent and are keyed by their own session_id.  The task is removed
+        by the done callback once it finishes (normally or cancelled).
+        """
+        key = getattr(event, "parent_session_id", "") or event.session_id
+        self._session_tasks.setdefault(key, set()).add(task)
+
+        def _on_done(_task: asyncio.Task) -> None:
+            tasks = self._session_tasks.get(key)
+            if tasks is None:
+                return
+            tasks.discard(_task)
+            if not tasks:
+                del self._session_tasks[key]
+
+        task.add_done_callback(_on_done)
+
+    def _cancel_subagent_tasks(self, session_id: str) -> int:
+        """Cancel every running task spawned by *session_id* (its subagents).
+
+        Called from the CancelledError path of ``exec_session``: when a
+        session is cancelled, all subagent runs it dispatched are cancelled
+        too so they do not keep occupying the worker / burning LLM budget.
+        Returns the number of tasks cancelled; safe when the registry is
+        empty.  Boundary: only covers tasks in this process (see
+        ``_session_tasks`` in __init__) — rabbitmq multi-worker setups
+        cannot cancel across processes.
+        """
+        tasks = self._session_tasks.get(session_id)
+        if not tasks:
+            return 0
+        current = asyncio.current_task()
+        cancelled = 0
+        for task in list(tasks):
+            if task.done() or task is current:
+                continue
+            task.cancel()
+            cancelled += 1
+        if cancelled:
+            self.logger.warning(
+                "Session %s cancelled: cascading cancel to %d subagent task(s)",
+                session_id,
+                cancelled,
+            )
+        return cancelled
 
     async def _mark_processed(self, event: ProcessableEvent) -> None:
         """Phase 1 幂等：把 message_id 记入 processed_messages。

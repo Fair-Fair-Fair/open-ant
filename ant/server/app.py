@@ -1,13 +1,16 @@
 """FastAPI application with Websocket support"""
 import logging
 import re
+import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from ant.core.context import SharedContext
+from ant.server import observability
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +33,29 @@ def create_app(context: SharedContext) -> FastAPI:
     )
     app.state.context = context
 
+    # ── Phase 4A (parallel) auth integration ─────────────────────────────
+    # ``ant/server/auth.py`` is written by the Phase 4A agent and exposes
+    # ``mount_auth(app, context)``.  The runtime import keeps this server
+    # shippable before that lands; once the module exists the mount happens
+    # automatically on the next start (no code change needed here).
+    auth_mounted = False
+    try:
+        from ant.server.auth import mount_auth
+
+        mount_auth(app, context)
+        auth_mounted = True
+        logger.info("ant.server.auth mounted (Phase 4A)")
+    except ImportError:
+        logger.warning(
+            "auth 未就绪，Phase 4A 完成后自动启用 — "
+            "ant.server.auth.mount_auth 不存在，跳过挂载"
+        )
+
     # Phase 0 temporary guard (improve.md #10): there is NO authentication yet
     # (full auth lands in Phase 4), so warn loudly when the API is reachable
     # from outside the local machine.  Default host stays 127.0.0.1.
     api = context.config.api
-    if api is not None and not _is_loopback_host(api.host):
+    if api is not None and not _is_loopback_host(api.host) and not auth_mounted:
         logger.warning("=" * 72)
         logger.warning(
             "SECURITY WARNING: api.host=%s is NOT loopback-only. The "
@@ -52,6 +73,22 @@ def create_app(context: SharedContext) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ── Phase 4B observability: HTTP request metrics ─────────────────────
+    @app.middleware("http")
+    async def _observe_http(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        """Count every HTTP request and time it (path-labelled)."""
+        start = time.perf_counter()
+        try:
+            response = await call_next(request)
+            return response
+        finally:
+            observability.observe_http_request(
+                request.method, request.url.path, time.perf_counter() - start
+            )
 
     @app.get("/", response_class=HTMLResponse)
     async def serve_web_ui():
@@ -137,6 +174,31 @@ def create_app(context: SharedContext) -> FastAPI:
             "session_id": session_id,
             "messages": enriched,
         })
+
+    # ── Phase 4B observability endpoints ─────────────────────────────────
+    @app.get("/healthz")
+    async def healthz():
+        """Liveness probe: process is up (always 200)."""
+        return JSONResponse(observability.check_liveness())
+
+    @app.get("/readyz")
+    async def readyz():
+        """Readiness probe: real backend checks; 503 only when one is down."""
+        statuses, ready = await observability.check_readiness(context)
+        return JSONResponse(
+            observability.render_readiness(statuses),
+            status_code=200 if ready else 503,
+        )
+
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus metrics endpoint (scrape also refreshes queue depth)."""
+        observability.update_queue_depth(context)
+        await observability.probe_outbox_depth(context)
+        return Response(
+            content=observability.generate_metrics(),
+            media_type=observability.METRICS_CONTENT_TYPE,
+        )
 
     # Websocket endpoint
     @app.websocket("/web_socket")

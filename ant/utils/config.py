@@ -146,11 +146,37 @@ class ChannelConfig(BaseModel):
     discord: DiscordConfig | None = None
 
 
+class AuthConfig(BaseModel):
+    """WebSocket / HTTP API authentication (Phase 4A)."""
+
+    enabled: bool = True
+    token_env: str = "OPEN_ANT_API_TOKEN"
+    """Environment variable holding the static API token. When it is empty
+    AND no DB key source is available, auth degrades to the Phase 0 banner
+    behaviour: loopback-only trust with a warning (default user ``local``)."""
+    db_keys: bool = True
+    """Also validate tokens against the ``api_keys`` table (needs the
+    context's MySQL session factory). The static token is checked first."""
+
+
+class RateLimitConfig(BaseModel):
+    """Per-message rate limiting for WebSocket clients (Phase 4A)."""
+
+    enabled: bool = True
+    window_seconds: int = Field(default=60, gt=0)
+    max_requests_per_window: int = Field(default=60, gt=0)
+    redis_url_env: str = "REDIS_URL"
+    """Env var holding the Redis URL (read via InfraSettings fallback)."""
+
+
 class ApiConfig(BaseModel):
     """HTTP API configuration"""
 
     host: str = "127.0.0.1"
     port: int = Field(default=8000, gt=0, lt=65536)
+    # Phase 4A: authentication + rate limiting
+    auth: AuthConfig = Field(default_factory=AuthConfig)
+    rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
 
 
 # ── Phase 1 infra backend selection ────────────────────────────────────
@@ -302,6 +328,14 @@ class InputGuardrailConfig(BaseModel):
     """Custom regex patterns for injection detection. None = use built-in defaults."""
 
 
+class LlmJudgeConfig(BaseModel):
+    """LLM-based content judgement (Phase 4C, consumed by the content-safety
+    agent). Only ``enabled`` is settled here; the remaining knobs are read
+    via ``getattr`` by the consuming agent for forward compatibility."""
+
+    enabled: bool = False
+
+
 class OutputGuardrailConfig(BaseModel):
     """Output sanitization and content policy enforcement."""
 
@@ -321,6 +355,11 @@ class OutputGuardrailConfig(BaseModel):
     """Custom regex patterns for secret redaction. None = use built-in defaults."""
     blocked_patterns: list[str] | None = None
     """Content policy patterns — responses matching these are replaced with a block message."""
+    redact_buffer_chars: int = Field(default=128, ge=0, le=4096)
+    """Streaming redaction buffer size in characters. 0 = redaction buffer
+    disabled (streamed tokens are released immediately, unredacted)."""
+    llm_judge: LlmJudgeConfig = Field(default_factory=LlmJudgeConfig)
+    """Optional LLM judge stage for content policy (Phase 4C)."""
 
 
 class GuardrailConfig(BaseModel):
@@ -330,6 +369,14 @@ class GuardrailConfig(BaseModel):
     """Master switch — when False ALL guardrail checks are bypassed."""
     input: InputGuardrailConfig = Field(default_factory=InputGuardrailConfig)
     output: OutputGuardrailConfig = Field(default_factory=OutputGuardrailConfig)
+
+
+class ObservabilityConfig(BaseModel):
+    """Metrics / structured logging (Phase 4B, consumed by the observability
+    agent — it reads but does not write this config)."""
+
+    metrics_enabled: bool = True
+    json_logs: bool = True
 
 
 class Config(BaseModel):
@@ -377,6 +424,9 @@ class Config(BaseModel):
     # Phase 2: tool execution + pipeline tuning (harness)
     tools: ToolConfig = Field(default_factory=ToolConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
+
+    # Phase 4B observability — consumed by the observability agent
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
 
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":

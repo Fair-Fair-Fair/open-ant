@@ -9,6 +9,22 @@ from ant.utils.config import Config
 logger = logging.getLogger(__name__)
 
 
+def _mask_pii(text: str) -> str:
+    """Mask user message text for logging (PII hardening, improve.md #19).
+
+    Message content is user data and may contain secrets, so the baseline
+    rule is: the FULL text must never reach the logs.  This helper keeps
+    only the first 50 characters (plus a ``…(len=N)`` suffix carrying the
+    total length when the message is longer) — enough to debug routing
+    and size without leaking the message itself.  Messages of at most 50
+    characters are logged verbatim, which is already bounded by the same
+    truncation rule.
+    """
+    if len(text) <= 50:
+        return text
+    return f"{text[:50]}…(len={len(text)})"
+
+
 T = TypeVar('T', bound=EventSource)
 
 

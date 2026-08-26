@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 import uvicorn
@@ -24,6 +25,16 @@ if TYPE_CHECKING:
     from ant.core.context import SharedContext
 
 logger = logging.getLogger(__name__)
+
+
+def _next_backoff(consecutive_failures: int) -> float:
+    """Exponential restart backoff in seconds (improve.md #15 crash-loop).
+
+    Doubles with every consecutive crash — 5s → 10s → 20s → 40s → 80s —
+    capped at 120s, so a crash-looping worker is no longer restarted
+    every 5 seconds forever.
+    """
+    return float(min(5 * 2 ** max(consecutive_failures - 1, 0), 120))
 
 
 class Server:
@@ -228,22 +239,64 @@ class Server:
             logger.info(f"Started {worker.__class__.__name__}")
 
     async def _monitor_workers(self) -> None:
-        """Monitor worker tasks, restart on crash."""
+        """Monitor worker tasks, restart crashed ones with backoff.
+
+        improve.md #15: crash-looping workers used to be restarted every
+        5s indefinitely.  Now each worker keeps a consecutive-crash
+        counter that grows the delay between restarts
+        (``_next_backoff``: 5s → 10s → 20s → 40s → … → 120s cap), and the
+        counter resets to zero after ``stable_window`` seconds without a
+        crash.  Every restart is logged at ERROR with its crash count so
+        crash-loop hotspots are visible in the logs.
+
+        ``_stop_all`` is untouched: this loop only restarts workers and
+        runs until cancelled, which the caller handles.
+        """
+        crash_count: dict[str, int] = {}
+        last_crash: dict[str, float] = {}
+        due: dict[str, float] = {}
+        stable_window = 300.0  # 5 minutes without a crash → reset counter
+
         while True:
+            now = time.monotonic()
             for worker in self.workers:
-                if worker.has_crashed():
-                    exc = worker.get_exception()
-                    if exc is None:
-                        logger.warning(
-                            f"{worker.__class__.__name__} exited unexpectedly"
+                name = worker.__class__.__name__
+                if not worker.has_crashed():
+                    # Stable run — reset the counter after 5 minutes
+                    if (
+                        name in crash_count
+                        and crash_count[name] > 0
+                        and now - last_crash.get(name, 0.0) >= stable_window
+                    ):
+                        crash_count[name] = 0
+                        last_crash[name] = now
+                        due[name] = 0.0
+                        logger.info(
+                            f"{name} stable for {stable_window:.0f}s — "
+                            "crash counter reset"
                         )
-                    else:
-                        logger.error(f"{worker.__class__.__name__} crashed: {exc}")
+                    continue
 
-                    worker.start()
-                    logger.info(f"Restarted {worker.__class__.__name__}")
+                if now < due.get(name, 0.0):
+                    continue  # still backing off for this worker
 
-            await asyncio.sleep(5)
+                count = crash_count.get(name, 0) + 1
+                crash_count[name] = count
+                last_crash[name] = now
+                backoff = _next_backoff(count)
+                due[name] = now + backoff
+
+                exc = worker.get_exception()
+                if exc is None:
+                    logger.error(f"{name} exited unexpectedly (crash #{count})")
+                else:
+                    logger.error(f"{name} crashed: {exc} (crash #{count})")
+                worker.start()
+                logger.info(
+                    f"Restarted {name} (crash #{count}, next backoff {backoff:.0f}s)"
+                )
+
+            await asyncio.sleep(1.0)
 
     async def _stop_all(self) -> None:
         """Stop everything in reverse startup order.
@@ -276,7 +329,16 @@ class Server:
         # (4) uvicorn API task (Phase 0 leftover — never stopped before)
         await self._stop_api_task()
 
-        # (5) config reloader
+        # (5) storage：MySQL 引擎优雅释放（asyncmy 连接在事件循环关闭后才
+        # 关会抛 AttributeError 噪音 traceback——真云冒烟时发现）
+        close = getattr(self.context.history_store, "close", None)
+        if callable(close):
+            try:
+                await close()
+            except Exception:
+                logger.warning("history store close failed", exc_info=True)
+
+        # (6) config reloader
         if self.config_reloader is not None:
             self.config_reloader.stop()
 

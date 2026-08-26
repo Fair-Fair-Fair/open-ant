@@ -1,16 +1,23 @@
 # 新增: src/ant/tools/policy.py
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
     from ant.core.agent import AgentSession
 
 logger = logging.getLogger(__name__)
+
+#: Phase 4E audit sink: async callable receiving one audit entry dict.
+#: Invoked fire-and-forget from ``ToolGovernance.record_call`` — a failing
+#: sink must never interrupt the tool call (principle 11: accounting/audit
+#: never breaks the main path).
+AuditSink = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass
@@ -32,6 +39,19 @@ class ToolGovernance:
         self._session_call_counts: dict[str, int] = defaultdict(int)
         self._turn_call_counts: dict[str, int] = defaultdict(int)
         self._audit_log: list[dict[str, Any]] = []
+        self._audit_sink: AuditSink | None = None
+
+    def set_audit_sink(self, sink: AuditSink | None) -> None:
+        """Attach a persistent audit sink (best-effort, never blocking).
+
+        *sink* is an async callable receiving the same entry dict that is
+        appended to the in-memory ``_audit_log``.  It is invoked
+        fire-and-forget from ``record_call`` (``asyncio.create_task``);
+        a failing sink never interrupts the tool call itself, and its
+        exceptions are swallowed by the done callback (principle 11:
+        accounting/audit must never break the main path).
+        """
+        self._audit_sink = sink
 
     def check_permission(self, tool_name: str, session: "AgentSession") -> tuple[bool, str]:
         """Check if a tool call is allowed."""
@@ -57,13 +77,35 @@ class ToolGovernance:
         """Record a tool call for audit."""
         self._session_call_counts[tool_name] += 1
         self._turn_call_counts[tool_name] += 1
-        self._audit_log.append({
+        entry = {
             "tool": tool_name,
             "args": args,
             "result_preview": result[:200],
             "elapsed": elapsed,
             "timestamp": time.time(),
-        })
+        }
+        self._audit_log.append(entry)
+
+        # Phase 4E: fire-and-forget persistence.  The sink runs in its own
+        # task so a slow / failing database never blocks the tool call.
+        if self._audit_sink is not None:
+            try:
+                task = asyncio.create_task(self._audit_sink(entry))
+            except Exception as exc:
+                # Sink misbehaving before producing a coroutine (sync
+                # callable, etc.): log and move on — audit never interrupts.
+                logger.warning("Audit sink dispatch failed: %s", exc)
+            else:
+                task.add_done_callback(self._on_audit_sink_done)
+
+    @staticmethod
+    def _on_audit_sink_done(task: asyncio.Task) -> None:
+        """Swallow sink exceptions (fire-and-forget; audit is best-effort)."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("Audit sink failed (audit is best-effort): %s", exc)
 
     def reset_turn_counts(self) -> None:
         self._turn_call_counts.clear()

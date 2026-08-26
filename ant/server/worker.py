@@ -45,14 +45,49 @@ class Worker(ABC):
             return self._task.exception()
         return None
 
-    async def stop(self) -> None:
-        """Gracefully stop the worker"""
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+    async def stop(self, timeout: float = 15.0) -> None:
+        """Gracefully stop the worker.
+
+        Shutdown is bounded by ``timeout`` seconds (improve.md "停机无超
+        时"): a worker that ignores cancellation can no longer hang the
+        server forever — on timeout a warning is logged and stop() returns
+        anyway.  Idempotent: safe to call multiple times and a no-op when
+        the worker was never started (or already finished).
+
+        A channel updater that blocks inside its own ``stop()`` (e.g. a
+        stuck ``updater.stop()``) is caught by this same timeout at the
+        ChannelWorker level — the channels themselves need no timers.
+        """
+        if self._task is None:
+            return
+        self._task.cancel()
+        try:
+            await asyncio.wait_for(self._stop_impl(), timeout=timeout)
+        except asyncio.TimeoutError:
+            self.logger.warning(
+                f"{self.__class__.__name__} did not stop within {timeout}s "
+                "— returning anyway"
+            )
+
+    async def _stop_impl(self) -> None:
+        """Wait for the worker task to finish after cancellation.
+
+        Split out from stop() so shutdown can be wrapped in a bounded
+        timeout (and so tests can simulate a stuck shutdown).  Exceptions
+        raised by a crashed worker are logged, not re-raised, so one
+        broken worker cannot abort the whole server shutdown chain.
+        """
+        if self._task is None:
+            return
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            self.logger.warning(
+                f"{self.__class__.__name__} raised during shutdown",
+                exc_info=True,
+            )
 
 
 class SubscribeWorker(Worker):

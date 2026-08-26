@@ -35,6 +35,10 @@ class ChannelWorker(Worker):
         try:
             await asyncio.gather(*channel_tasks)
         except asyncio.CancelledError:
+            # Stop order: cancel the gather first, then stop every channel
+            # so no updater keeps polling.  A channel whose stop() blocks
+            # (e.g. a stuck updater) is bounded by Worker.stop(timeout) —
+            # the worker layer times out this whole run() task.
             await asyncio.gather(*[channel.stop() for channel in self.channels])
             raise
 
