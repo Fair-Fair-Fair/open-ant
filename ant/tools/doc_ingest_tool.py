@@ -20,7 +20,9 @@ if TYPE_CHECKING:
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Absolute path to the file or directory to ingest"
+                "description": "Absolute path to the file or directory to ingest "
+                               "(must exist and be within the sandbox workspace; "
+                               "errors are returned as text)"
             }
         },
         "required": ["path"]

@@ -6,13 +6,18 @@ Stages integrate with SessionFSM (lifecycle) and ExecutionTracer (observability)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from typing import Any
 
 from ant.core.session_fsm import SessionPhase
 from ant.core.stream_pipeline import StreamPipelineStage
 
 logger = logging.getLogger(__name__)
+
+# 写类工具：并发执行可能产生同文件写竞态，默认保持串行（config.parallel_writes=True 除外）。
+_WRITE_TOOLS = {"write", "edit", "bash"}
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +64,10 @@ class StreamValidationStage(StreamPipelineStage):
 
         if ctx.iteration >= ctx.max_iterations:
             _try_transition(ctx.session.fsm, SessionPhase.EXHAUSTED)
+            # 必须终止外层 run() 循环：不置 stop_reason 的话，上一轮
+            # ToolExecutionStage 留下的 "tool_calls" 会让 StreamPipeline.run()
+            # 再次进入循环 → 无限 yield error 死循环（Phase 2 验收发现）。
+            ctx.stop_reason = "exhausted"
             if span:
                 span.add_event("max_iterations_reached", {"iteration": ctx.iteration})
             _finish_span(span, "ok")
@@ -277,6 +286,16 @@ class StreamLLMCallStage(StreamPipelineStage):
                         "response_length": len(ctx.response_content),
                     })
 
+            elif event_type == "usage":
+                # Token/cost accounting event (llm-layer 协议)：不转发给前端，
+                # 交给 ctx.usage_recorder（若已注入）。记账失败只 debug 日志，
+                # 绝不能打断流式输出。
+                if ctx.usage_recorder is not None:
+                    try:
+                        await ctx.usage_recorder(chunk["data"])
+                    except Exception:
+                        logger.debug("usage recording failed", exc_info=True)
+
             elif event_type == "error":
                 ctx.stop_reason = "error"
                 if span:
@@ -298,76 +317,161 @@ class StreamToolExecutionStage(StreamPipelineStage):
     Yields ``status`` and ``tool_result`` events to the frontend, then
     adds the assistant message + tool-result messages to session state so
     the next pipeline iteration sees the updated conversation.
+
+    Execution plan（简单两步法 + 两道闸门）：
+      1. ``require_confirmation`` 策略命中的工具逐个串行执行，每个都等待
+         用户批准——确认审批保持逐工具生效，被确认工具永远不进入并行组；
+      2. 写类工具（write/edit/bash）按 LLM 返回顺序逐个串行执行——
+         确定性优先，避免同文件写竞态；
+      3. 只读工具用 ``asyncio.gather`` 并行执行，并发上限
+         ``ctx.max_parallel_tools``（asyncio.Semaphore 闸门）。
+
+    当 ``ctx.parallel_writes`` 为 True 时，写类工具并入并行组（跳过第 2 步）。
+    每个工具的执行都受 ``ctx.tool_timeout`` 约束：超时返回 LLM 可感知的
+    错误串，单个工具失败/超时不会中断其他工具。结果按原 ``tool_calls``
+    顺序组装（结尾 zip 逻辑不变，并行执行但顺序还原）。
     """
 
     async def execute(self, ctx, next):
         if ctx.stop_reason == "tool_calls" and ctx.tool_calls:
             span = _start_span(ctx, "ToolExecutionStage")
 
-            tool_results: list[str] = []
-            for tc in ctx.tool_calls:
-                tool_span = _start_span(ctx, f"ToolExecution:{tc.name}")
+            tool_results: list[str] = [""] * len(ctx.tool_calls)
 
-                yield {
-                    "type": "status",
-                    "data": f"⏳ 执行中: {tc.name}…",
-                }
+            # ── Human-in-the-Loop: require confirmation for high-privilege tools ──
+            policy = None
+            if ctx.session.tools and ctx.session.tools._governance:
+                policy = ctx.session.tools._governance.policy
 
-                # ── Human-in-the-Loop: require confirmation for high-privilege tools ──
-                tools = ctx.session.tools
-                if tools and tools._governance:
-                    policy = tools._governance.policy
-                    if tc.name in policy.require_confirmation:
-                        yield {
-                            "type": "status",
-                            "data": f"⏳ 等待批准: {tc.name}…",
-                        }
+            def _needs_confirmation(tc) -> bool:
+                return bool(policy and tc.name in policy.require_confirmation)
 
-                        broker = ctx.session.shared_context.confirmation_broker
-                        approved = await broker.request_approval(
-                            session_id=ctx.session.session_id,
-                            tool_name=tc.name,
-                            tool_args=tc.arguments,
-                            context=ctx.session.shared_context,
-                            agent_id=ctx.session.agent.agent_def.id if ctx.session.agent else "",
-                        )
+            confirmed: list[tuple[int, Any]] = []
+            pending: list[tuple[int, Any]] = []
+            for idx, tc in enumerate(ctx.tool_calls):
+                (confirmed if _needs_confirmation(tc) else pending).append((idx, tc))
 
-                        if not approved:
-                            result = (
-                                f"Tool call denied: the user did not approve "
-                                f"the execution of '{tc.name}'."
-                            )
-                            tool_results.append(result)
-                            if tool_span:
-                                tool_span.add_event("confirmation_denied", {
-                                    "tool": tc.name,
-                                })
-                                _finish_span(tool_span, "ok")
-                            continue
-                # ────────────────────────────────────────────────────────────
+            # 剩余工具再分写类（串行）与只读（并行）。parallel_writes=True 时
+            # 写类也并入并行组；被确认工具始终先串行处理完，再并行其余。
+            if ctx.parallel_writes:
+                write_tools: list[tuple[int, Any]] = []
+                read_tools: list[tuple[int, Any]] = pending
+            else:
+                write_tools = [(i, tc) for i, tc in pending if tc.name in _WRITE_TOOLS]
+                read_tools = [(i, tc) for i, tc in pending if tc.name not in _WRITE_TOOLS]
 
-                result = await ctx.session._execute_tool_call(tc)
+            async def _run_tool(tc) -> str:
+                """执行单个工具，受 ctx.tool_timeout 硬超时约束。
+
+                超时转错误串（LLM 可感知）；_execute_tool_call 已兜底工具
+                内部异常，半途失败不会中断其他工具。
+                """
+                try:
+                    result = await asyncio.wait_for(
+                        ctx.session._execute_tool_call(tc), timeout=ctx.tool_timeout
+                    )
+                except asyncio.TimeoutError:
+                    result = f"Tool {tc.name} timed out after {ctx.tool_timeout:g}s"
 
                 # ── Tool result injection scan ──
                 guardrails = ctx.session.shared_context.guardrails
                 if guardrails and guardrails.output:
                     result = guardrails.output.scan_tool_result(result)
                 # ──────────────────────────────────
+                return result
 
-                tool_results.append(result)
+            # ── 1) 被确认工具：逐个串行 + 逐工具审批流（行为不变） ──
+            for idx, tc in confirmed:
+                tool_span = _start_span(ctx, f"ToolExecution:{tc.name}")
 
+                yield {"type": "status", "data": f"⏳ 执行中: {tc.name}…"}
+                yield {"type": "status", "data": f"⏳ 等待批准: {tc.name}…"}
+
+                broker = ctx.session.shared_context.confirmation_broker
+                approved = await broker.request_approval(
+                    session_id=ctx.session.session_id,
+                    tool_name=tc.name,
+                    tool_args=tc.arguments,
+                    context=ctx.session.shared_context,
+                    agent_id=(
+                        ctx.session.agent.agent_def.id if ctx.session.agent else ""
+                    ),
+                )
+
+                if not approved:
+                    result = (
+                        f"Tool call denied: the user did not approve "
+                        f"the execution of '{tc.name}'."
+                    )
+                    tool_results[idx] = result
+                    if tool_span:
+                        tool_span.add_event("confirmation_denied", {"tool": tc.name})
+                        _finish_span(tool_span, "ok")
+                    continue
+
+                result = await _run_tool(tc)
+                tool_results[idx] = result
                 if tool_span:
-                    tool_span.add_event("tool_result_length", {
-                        "length": len(result),
-                    })
+                    tool_span.add_event("tool_result_length", {"length": len(result)})
                     _finish_span(tool_span, "ok")
 
                 # Truncate long results for display
                 brief = result[:200] + "…" if len(result) > 200 else result
-                yield {
-                    "type": "tool_result",
-                    "data": {"name": tc.name, "result": brief},
+                yield {"type": "tool_result", "data": {"name": tc.name, "result": brief}}
+
+            # ── 2) 写类工具：逐个串行（顺序与 LLM 返回一致，保证确定性） ──
+            for idx, tc in write_tools:
+                tool_span = _start_span(ctx, f"ToolExecution:{tc.name}")
+
+                yield {"type": "status", "data": f"⏳ 执行中: {tc.name}…"}
+
+                result = await _run_tool(tc)
+                tool_results[idx] = result
+                if tool_span:
+                    tool_span.add_event("tool_result_length", {"length": len(result)})
+                    _finish_span(tool_span, "ok")
+
+                # Truncate long results for display
+                brief = result[:200] + "…" if len(result) > 200 else result
+                yield {"type": "tool_result", "data": {"name": tc.name, "result": brief}}
+
+            # ── 3) 只读工具：gather 并行，Semaphore 限流 max_parallel_tools ──
+            if read_tools:
+                semaphore = asyncio.Semaphore(max(1, ctx.max_parallel_tools))
+                tool_spans = {
+                    idx: _start_span(ctx, f"ToolExecution:{tc.name}")
+                    for idx, tc in read_tools
                 }
+                for _, tc in read_tools:
+                    yield {"type": "status", "data": f"⏳ 执行中: {tc.name}…"}
+
+                async def _gated(tc) -> str:
+                    async with semaphore:
+                        return await _run_tool(tc)
+
+                # return_exceptions=True：并行组里单个异常转错误串，不中断其他工具。
+                outcomes = await asyncio.gather(
+                    *(_gated(tc) for _, tc in read_tools),
+                    return_exceptions=True,
+                )
+
+                for (idx, tc), outcome in zip(read_tools, outcomes):
+                    if isinstance(outcome, Exception):
+                        result = f"Tool {tc.name} failed: {outcome}"
+                    else:
+                        result = outcome
+                    tool_results[idx] = result
+                    tool_span = tool_spans[idx]
+                    if tool_span:
+                        tool_span.add_event("tool_result_length", {"length": len(result)})
+                        _finish_span(tool_span, "ok")
+
+                    # Truncate long results for display
+                    brief = result[:200] + "…" if len(result) > 200 else result
+                    yield {
+                        "type": "tool_result",
+                        "data": {"name": tc.name, "result": brief},
+                    }
 
             # Record the assistant turn (with tool_calls) in session state
             assistant_msg: dict = {
@@ -387,7 +491,7 @@ class StreamToolExecutionStage(StreamPipelineStage):
             }
             await ctx.session.state.add_message(assistant_msg)
 
-            # Record each tool result
+            # Record each tool result (zip 还原 LLM 原始顺序，与执行顺序无关)
             for tc, result in zip(ctx.tool_calls, tool_results):
                 await ctx.session.state.add_message({
                     "role": "tool",

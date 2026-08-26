@@ -21,14 +21,15 @@ def create_webread_tool(config: "Config") -> BaseTool | None:
         name="webread",
         description=(
             "Read and extract content from a web page. "
-            "Returns the page content as markdown."
+            "Returns the page content as markdown, or an error string "
+            "if the URL cannot be read."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "The URL to read",
+                    "description": "The URL to read (http/https)",
                 }
             },
             "required": ["url"],

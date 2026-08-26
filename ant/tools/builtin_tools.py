@@ -10,13 +10,15 @@ if TYPE_CHECKING:
 
 
 @tool(name="read",
-      description="Read the content of a text file",
+      description="Read the content of a text file. Errors (file not found, permission denied, "
+                  "directory) are returned as text; content longer than max_chars is truncated "
+                  "with a notice.",
       parameters={
           "type": "object",
           "properties": {
               "path": {
                   "type": "string",
-                  "description": "The path to the text file to read"
+                  "description": "The path to the text file to read (must be within the sandbox workspace)"  # noqa: E501
               },
               "max_chars": {
                   "type": "integer",
@@ -52,13 +54,14 @@ async def read_file(path: str, session: "AgentSession", max_chars: int = 50000) 
 
 
 @tool(name="write",
-      description="write content to a file",
+      description="Write content to a file, overwriting it if it already exists. "
+                  "Returns a confirmation or an error string.",
       parameters={
           "type": "object",
           "properties": {
               "path": {
                   "type": "string",
-                  "description": "The path to the text file to write"
+                  "description": "The path to the text file to write (must be within the sandbox workspace)"  # noqa: E501
               },
               "content": {
                   "type": "string",
@@ -82,17 +85,19 @@ async def write_file(path: str, content: str, session: "AgentSession") -> str:
 
 
 @tool(name="edit",
-      description="Edit a file by replacing a string with new content",
+      description="Edit a file by replacing a string with new content. Replaces ALL occurrences "
+                  "of old_string; if old_string is not found, returns an error without modifying "
+                  "the file.",
       parameters={
           "type": "object",
           "properties": {
               "path": {
                   "type": "string",
-                  "description": "The path to the text file to edit"
+                  "description": "The path to the text file to edit (must be within the sandbox workspace)"  # noqa: E501
               },
               "old_string": {
                   "type": "string",
-                  "description": "The string to be replaced"
+                  "description": "The exact string to be replaced (all occurrences are replaced)"
               },
               "new_string": {
                   "type": "string",
@@ -120,7 +125,8 @@ async def edit_file(path: str, old_string: str, new_string: str, session: "Agent
 
 
 @tool(name="bash",
-      description="Execute a bash shell command",
+      description="Execute a bash shell command. Commands run under the sandbox with a timeout "
+                  "(default 30s); output longer than 100,000 chars is truncated.",
       parameters={
           "type": "object",
           "properties": {

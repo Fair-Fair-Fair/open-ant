@@ -21,14 +21,15 @@ def create_websearch_tool(config: "Config") -> BaseTool | None:
         name="websearch",
         description=(
             "Search the web for information. "
-            "Returns a list of results with titles, URLs, and snippets."
+            "Returns a list of results with titles, URLs, and snippets, "
+            "or an error string if the search fails."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query",
+                    "description": "The search query (concise keywords give better results)",
                 }
             },
             "required": ["query"],

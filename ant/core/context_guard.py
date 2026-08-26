@@ -1,5 +1,6 @@
 """Context guard for proactive context window management."""
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -13,9 +14,12 @@ from litellm.types.completion import (
 )
 
 from ant.core.session_state import SessionState
+from ant.provider.llm import LLMProvider
 
 if TYPE_CHECKING:
     from ant.core.context import SharedContext
+
+logger = logging.getLogger(__name__)
 
 
 # Default max size for tool result content before truncation
@@ -135,18 +139,45 @@ class ContextGuard:
         self,
         state: "SessionState",
     ) -> "SessionState":
-        """Compact history by summarizing older messages."""
+        """Compact history by summarizing older messages.
+
+        Summarization runs on a dedicated small model when
+        ``config.llm.summarize_model`` is set, otherwise on the session's
+        main LLM.  Timeout/retry are already handled inside LLMProvider
+        (litellm Router ``timeout``/``num_retries``), so no extra
+        ``asyncio.wait_for`` is needed here.
+
+        If summarization fails for any reason the guard degrades to a
+        *hard truncation*: keep only the newest ``keep_count`` messages and
+        drop the rest without a summary.  A slightly lossy context is
+        better than a crashed turn (errors never propagate upward).
+        """
         compress_count = self._compress_message_count(state)
+        keep_count = max(4, int(len(state.messages) * 0.2))
 
         old_messages = state.messages[:compress_count]
         old_text = self._serialize_messages_for_summary(old_messages)
 
         summary_prompt = COMPACT_PROMPT.format(conversation=old_text)
 
-        response, _, _ = await state.agent.llm.chat(
-            [{"role": "user", "content": summary_prompt}],
-            [],  # No tools needed
-        )
+        llm = self._summary_llm(state)
+        try:
+            response, _, _ = await llm.chat(
+                [{"role": "user", "content": summary_prompt}],
+                [],  # No tools needed
+            )
+        except Exception as exc:
+            logger.warning(
+                "Context compaction summarization failed (%s); degrading to "
+                "hard truncation: keeping the newest %d messages without a "
+                "summary",
+                exc,
+                keep_count,
+            )
+            # Hard truncation fallback — drop the oldest messages, no
+            # summary text (state updated in place, same as the success path).
+            state.messages = state.messages[-keep_count:] if keep_count else []
+            return state
 
         # Build compacted message list
         messages: list[Message] = []
@@ -167,3 +198,17 @@ class ContextGuard:
         # Update state in place
         state.messages = messages
         return state
+
+    def _summary_llm(self, state: "SessionState") -> "LLMProvider":
+        """LLM used for compaction summarization.
+
+        ``config.llm.summarize_model`` (when set) is used as a dedicated
+        small model for the compaction job; otherwise the session's main
+        LLM is reused.
+        """
+        llm_config = self.shared_context.config.llm
+        if llm_config and llm_config.summarize_model:
+            return LLMProvider.from_config(
+                llm_config.model_copy(update={"model": llm_config.summarize_model})
+            )
+        return state.agent.llm

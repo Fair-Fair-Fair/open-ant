@@ -3,7 +3,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from ant.tools.base import BaseTool
+from ant.tools.base import BaseTool, validate_args
 from ant.tools.builtin_tools import bash, edit_file, read_file, write_file
 from ant.tools.policy import ToolGovernance
 
@@ -46,6 +46,14 @@ class ToolRegistry:
         if tool is None:
             logger.warning("Tool not found: %s", name)
             return f"Tool not found: {name}"
+
+        # 执行前 JSON Schema 参数校验：校验失败直接返回错误串（供 LLM 纠错），
+        # 不执行工具、不 raise、governance 不计入调用次数。
+        ok, validation_error = validate_args(
+            tool.get_tool_schema()["function"]["parameters"], kwargs
+        )
+        if not ok:
+            return validation_error
 
         if self._governance:
             allowed, reason = self._governance.check_permission(name, session)

@@ -27,14 +27,18 @@ def create_skill_tool(skill_loader: "SkillLoader"):
 
     @tool(
         name="skill",
-        description=f"Load and invoke a specialized skill. {skills_xml}",
+        description=(
+            f"Load and invoke a specialized skill. Returns the skill definition "
+            f"content, or an error string if the skill cannot be loaded. "
+            f"{skills_xml}"
+        ),
         parameters={
             "type": "object",
             "properties": {
                 "skill_name": {
                     "type": "string",
                     "enum": skill_enum,
-                    "description": "The name of the skill to load",
+                    "description": "The name of the skill to load (must be one of the enum values)"  # noqa: E501
                 }
             },
             "required": ["skill_name"],

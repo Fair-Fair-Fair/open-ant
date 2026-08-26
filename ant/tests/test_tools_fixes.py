@@ -52,8 +52,15 @@ async def test_execute_tool_unknown_tool_returns_error_string() -> None:
 
 
 async def test_execute_tool_bad_param_returns_error_string() -> None:
-    """幻觉参数（多余 kwarg 触发 TypeError）不再冒泡炸掉整轮。"""
+    """幻觉参数被 JSON Schema 校验拦截：返回错误串、工具不执行（Phase 2 参数校验）。
+
+    注意：Phase 2 起多余参数由 validate_args 在 execute_tool 内提前拦截，
+    不再走到函数调用 TypeError 分支；错误串以「参数校验失败」开头并点名参数。
+    """
+    executed: list[bool] = []
+
     async def _impl(session) -> str:
+        executed.append(True)
         return "ok"
 
     registry = ToolRegistry()
@@ -63,7 +70,9 @@ async def test_execute_tool_bad_param_returns_error_string() -> None:
         "simple_tool", session=object(), hallucinated_param=1
     )
     assert isinstance(result, str)
-    assert result.startswith("Tool execution error:")
+    assert result.startswith("参数校验失败")
+    assert "hallucinated_param" in result
+    assert executed == []  # 校验失败的工具不执行
 
 
 async def test_execute_tool_exception_returns_error_and_logs_traceback(

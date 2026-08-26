@@ -7,11 +7,12 @@ through the chain without buffering.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable
 
 if TYPE_CHECKING:
     from litellm.types.completion import ChatCompletionMessageParam as Message
@@ -34,6 +35,11 @@ class PipelineContext:
     metadata: dict[str, Any] = field(default_factory=dict)
     iteration: int = 0  # 在 StreamToolExecutionStage 阶段，每当成功执行完一组tool_calls后，会执行 ctx.iteration += 1。  # noqa: E501
     max_iterations: int = 10  # Agent 最多可以连续进行 10 轮“AI思考→调用一组工具→执行完毕→AI继续思考”的循环。  # noqa: E501
+    max_parallel_tools: int = 8  # 只读工具并行执行上限（asyncio.Semaphore 闸门）。llm-layer 从 config 注入。  # noqa: E501
+    tool_timeout: float = 120.0  # 单个工具执行超时（秒）；超时返回 LLM 可感知的错误串。llm-layer 从 config 注入。  # noqa: E501
+    parallel_writes: bool = False  # True 时写类工具（write/edit/bash）并入并行组。llm-layer 从 config 注入。  # noqa: E501
+    usage_recorder: Callable[[dict], Awaitable[None]] | None = None  # llm-layer 注入的 usage 记账回调（消费 {"type":"usage"} 事件时调用）。  # noqa: E501
+    aborted: bool = False  # 断流标志：客户端中途断开/任务被取消时置 True，供 pipeline 外层日志使用。  # noqa: E501
     start_time: float = field(default_factory=time.time)
     trace: "Trace | None" = None
 
@@ -87,10 +93,27 @@ class StreamPipeline:
         Yields every streaming event (token, status, tool_result, error,
         done) produced by the chain so the caller can forward them to the
         frontend.
+
+        Stream-cut-off fallback: if the consumer closes the generator
+        (``aclose()`` → GeneratorExit) or the consuming task is cancelled
+        (CancelledError) before the terminal ``done`` event was delivered,
+        the user's message is left unanswered — a placeholder assistant
+        reply is persisted so the session can continue, then the original
+        exception is re-raised.
         """
+        terminal_emitted = False
         while True:
-            async for event in self._execute_chain(0, ctx):
-                yield event
+            try:
+                async for event in self._execute_chain(0, ctx):
+                    if event.get("type") == "done":
+                        terminal_emitted = True
+                    yield event
+            except (GeneratorExit, asyncio.CancelledError):
+                # GeneratorExit arrives at the yield point on aclose();
+                # CancelledError when the consuming task is cancelled.
+                ctx.aborted = True
+                await self._persist_interrupted_placeholder(ctx, terminal_emitted)
+                raise
 
             if ctx.stop_reason == "tool_calls":
                 # ToolExecutionStage has already added tool results to
@@ -101,6 +124,31 @@ class StreamPipeline:
             # Any other stop reason (stop, length, content_filter, error)
             # means we are done.
             break
+
+    async def _persist_interrupted_placeholder(
+        self, ctx: PipelineContext, terminal_emitted: bool
+    ) -> None:
+        """Persist a placeholder assistant reply after a cut-off stream.
+
+        Only when the conversation genuinely lacks an assistant reply:
+        either the response had content but the terminal ``done`` event
+        was never delivered, or the last persisted message is still the
+        user's (no reply of any kind was recorded yet).
+        """
+        last_msg = (
+            ctx.session.state.messages[-1]
+            if ctx.session.state.messages
+            else None
+        )
+        needs_placeholder = (
+            (not terminal_emitted and ctx.response_content)
+            or (last_msg is not None and last_msg.get("role") == "user")
+        )
+        if needs_placeholder:
+            await ctx.session.state.add_message({
+                "role": "assistant",
+                "content": "⚠️ 响应中断：连接被断开，请重新发送消息继续。",
+            })
 
     async def _execute_chain(
         self,

@@ -8,6 +8,7 @@ from datetime import datetime
 # stream output support
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict
 
+import litellm
 from litellm.types.completion import (
     ChatCompletionMessageParam as Message,
 )
@@ -30,6 +31,7 @@ from ant.core.stream_stages import (
 )
 from ant.core.tracer import ExecutionTracer
 from ant.provider.llm import LLMProvider
+from ant.provider.llm.usage import UsageRecorder
 
 # 17 document ingestion
 from ant.tools.doc_ingest_tool import ingest_document
@@ -109,8 +111,32 @@ class Agent:
         return registry
 
     def _get_token_threshold(self) -> int:
-        """Get token threshold based on model's context window."""
-        # Default to 80% of 200k context
+        """Get token threshold based on model's context window.
+
+        Dynamic: 80% of the model's ``max_input_tokens`` from litellm's
+        model registry.  Custom/unknown model names (not in the registry)
+        fall back to 160000 (80% of a 200k window) with a warning.
+        """
+        model = self.agent_def.llm.model
+        try:
+            info = litellm.get_model_info(model)
+            max_input = (
+                int(info.get("max_input_tokens") or 0) if isinstance(info, dict) else 0
+            )
+            if max_input > 0:
+                return int(max_input * 0.8)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "get_model_info(%s) failed: %s — falling back to threshold 160000",
+                model,
+                exc,
+            )
+            return 160000
+        logging.getLogger(__name__).warning(
+            "Model %s not in litellm model registry — "
+            "falling back to threshold 160000",
+            model,
+        )
         return 160000
 
     async def new_session(
@@ -295,6 +321,41 @@ class AgentSession:
             tool_schemas=self.tools.get_tool_schemas(),
             trace=trace,
         )
+
+        # ── Harness tuning from config ─────────────────────────────────
+        # PipelineContext fields `tool_timeout` / `max_parallel_tools` are
+        # being added by the parallel pipeline agent; setattr works whether
+        # or not the dataclass field exists yet, so this stays safe either
+        # way.  (`max_iterations` already exists on PipelineContext.)
+        cfg = self.shared_context.config
+        for _name, _value in (
+            ("max_iterations", cfg.pipeline.max_iterations),
+            ("tool_timeout", cfg.tools.default_timeout),
+            ("max_parallel_tools", cfg.pipeline.max_parallel_tools),
+            ("parallel_writes", cfg.tools.parallel_writes),
+        ):
+            setattr(ctx, _name, _value)
+
+        # ── Usage accounting ───────────────────────────────────────────
+        # ctx.usage_recorder: async callable receiving the usage dict that
+        # LLMProvider.stream_chat emits in its `usage` event.  Records into
+        # the MySQL usage_records table when storage is MySQL-backed
+        # (session_factory present); no-op otherwise.  Same setattr safety
+        # as above.
+        recorder = UsageRecorder(
+            session_factory=self.context._session_factory
+        )
+
+        async def _record_usage(data: dict) -> None:
+            await recorder.record_usage(
+                session_id=self.session_id,
+                model=data.get("model", ""),
+                prompt_tokens=data.get("prompt_tokens", 0),
+                completion_tokens=data.get("completion_tokens", 0),
+                cost=data.get("cost", 0.0),
+            )
+
+        setattr(ctx, "usage_recorder", _record_usage)
 
         error_occurred = False
         async for event in pipeline.run(ctx):

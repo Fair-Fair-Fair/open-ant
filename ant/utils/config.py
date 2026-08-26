@@ -17,7 +17,18 @@ class LLMConfig(BaseModel):
     api_key: str
     api_base: str | None = None
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=2048, gt=0)
+    # 4096 fits a 160k-token context window; the old 2048 default silently
+    # capped every response to half the budget (context_guard defaults).
+    max_tokens: int = Field(default=4096, gt=0)
+    timeout: float = Field(default=120.0, gt=0)
+    """Per-request timeout in seconds (applied by the litellm Router)."""
+    num_retries: int = Field(default=2, ge=0)
+    """Number of automatic retries for transient LLM failures (Router)."""
+    fallbacks: list[str] = Field(default_factory=list)
+    """Backup model names, tried in order when the primary model fails."""
+    summarize_model: str | None = None
+    """Small dedicated model for context compaction. None = use the main
+    model (config.llm.model) for summarization."""
 
     @field_validator("api_base")
     @classmethod
@@ -238,6 +249,28 @@ class SandboxConfig(BaseModel):
     network: NetworkSandboxConfig = Field(default_factory=NetworkSandboxConfig)
 
 
+# ── Tool execution configuration ─────────────────────────────────────────
+
+
+class ToolConfig(BaseModel):
+    """Tool execution tuning (harness pipeline)."""
+
+    default_timeout: int = Field(default=120, ge=1, le=600)
+    """Max seconds a single tool call may run before being cancelled."""
+    parallel_writes: bool = False
+    """Whether write-class tools (write_file/edit_file) may run in parallel.
+    Default False: writes stay serial to avoid same-file races."""
+
+
+class PipelineConfig(BaseModel):
+    """Agent harness pipeline tuning."""
+
+    max_iterations: int = Field(default=10, ge=1, le=50)
+    """Max "LLM thinks → tool round" cycles per turn."""
+    max_parallel_tools: int = Field(default=8, ge=1, le=32)
+    """Max independent tool calls executed concurrently per round."""
+
+
 # ── Guardrail configuration ──────────────────────────────────────────────
 
 
@@ -328,6 +361,10 @@ class Config(BaseModel):
 
     # guardrails — input/output content safety layer
     guardrails: GuardrailConfig = Field(default_factory=GuardrailConfig)
+
+    # Phase 2: tool execution + pipeline tuning (harness)
+    tools: ToolConfig = Field(default_factory=ToolConfig)
+    pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
 
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":

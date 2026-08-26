@@ -27,6 +27,8 @@ dependencies = [
     "alembic>=1.13",
     "aio-pika>=9.4",
     "pydantic-settings>=2.2",
+    # Phase 2: tool schema generation (pydantic model → JSON Schema)
+    "jsonschema>=4.20",
 ]
 
 # Optional integrations — install what you need:
