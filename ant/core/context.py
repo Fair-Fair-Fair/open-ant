@@ -119,6 +119,11 @@ class SharedContext:
 
         self.embedding_provider = EmbeddingProvider.from_config(config)
         self.vector_store = VectorStore.from_config(config, self.embedding_provider)
+        # Wrap in the hybrid store: vector + BM25 dual index, fused on query.
+        # Writes maintain both indexes transparently for all callers.
+        if config.memory.hybrid_enabled:
+            from ant.provider.memory.hybrid_store import HybridMemoryStore
+            self.vector_store = HybridMemoryStore(self.vector_store, config)
         # Create retriever before guard because guard depends on retriever
         self.memory_retriever = MemoryRetriever(self)
         self.memory_guard = MemoryGuard(self)

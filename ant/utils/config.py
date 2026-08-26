@@ -64,10 +64,33 @@ class MemoryConfig(BaseModel):
     min_importance: int = Field(default=5, ge=1, le=10)
     merge_top_k: int = Field(default=3, gt=0, le=10)
     merge_similarity: float = Field(default=0.85, gt=0.0, lt=1.0)
-    chunk_size: int = Field(default=1000, gt=0, le=10000)
-    chunk_overlap: int = Field(default=200, ge=0, le=2000)
+    # OpenClaw-aligned chunking: ~500 tokens with a 50-token overlap window.
+    # (Chinese: 1 char ≈ 1 token, so 500 chars ≈ 500 tokens.)
+    chunk_size: int = Field(default=500, gt=0, le=10000)
+    chunk_overlap: int = Field(default=50, ge=0, le=2000)
     docs_path: str | None = None
     doc_similarity_threshold: float = Field(default=0.75, gt=0.0, lt=1.0)
+
+    # ── Hybrid retrieval (OpenClaw-aligned: vector + keyword dual index) ──
+    hybrid_enabled: bool = True
+    """False = pure semantic search (legacy behaviour)."""
+    fusion_mode: Literal["rrf", "weighted"] = "rrf"
+    """How vector and BM25 results are combined.
+
+    ``rrf``      — Reciprocal Rank Fusion: rank-based, immune to score
+                   scale mismatch (default; recommended).
+    ``weighted`` — OpenClaw-style normalized weighted sum (70/30)."""
+    vector_weight: float = Field(default=0.7, ge=0.0, le=1.0)
+    bm25_weight: float = Field(default=0.3, ge=0.0, le=1.0)
+    score_threshold: float = Field(default=0.0, ge=0.0, lt=1.0)
+    """Drop fused results below this normalized score. 0 = disabled."""
+    diversity_by_source: bool = True
+    """Keep the top hit per source first, then fill — prevents one long
+    document from crowding out all others in the context window."""
+    reranker: Literal["none", "cross_encoder"] = "none"
+    """Optional second-stage rerank. ``cross_encoder`` needs the model
+    available locally (offline cache) and degrades gracefully otherwise."""
+    reranker_model: str = "BAAI/bge-reranker-base"
 
 
 class TelegramConfig(BaseModel):

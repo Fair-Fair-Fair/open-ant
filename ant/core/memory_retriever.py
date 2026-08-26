@@ -32,7 +32,8 @@ class MemoryRetriever:
     async def retrieve(
         self, query: str, top_k: int | None = None
     ) -> list["MemoryDocument"]:
-        """Retrieve top-k most relevant memories for a query."""
+        """Hybrid-retrieve top-k most relevant memories for a query
+        (vector + BM25 fusion, threshold, diversity, optional rerank)."""
         if top_k is None:
             top_k = self.context.config.memory.top_k
 
@@ -43,10 +44,25 @@ class MemoryRetriever:
             self._hits += 1
         return results
 
+    async def retrieve_semantic(
+        self, query: str, top_k: int | None = None
+    ) -> list["MemoryDocument"]:
+        """Pure vector retrieval — used for memory dedup/merge decisions
+        where semantic similarity (not keyword overlap) is the signal."""
+        if top_k is None:
+            top_k = self.context.config.memory.merge_top_k
+
+        vector_store = self.context.vector_store
+        if hasattr(vector_store, "semantic_query"):
+            return await vector_store.semantic_query(query, top_k=top_k)
+        return await vector_store.query(query, top_k=top_k)
+
     def format_for_prompt(self, memories: list["MemoryDocument"]) -> str:
         """Format retrieved memories into a Markdown block for system prompt.
 
-        Distinguishes document snippets from conversational memories.
+        Distinguishes document snippets from conversational memories and
+        includes the retrieval score so the model can weigh each item
+        itself (defense against mis-ranked top results).
         """
         if not memories:
             return ""
@@ -54,13 +70,13 @@ class MemoryRetriever:
         lines = ["## Relevant Memories", ""]
         for mem in memories:
             meta = mem.metadata
-            # 判断类型
+            score = f"相关度:{mem.score:.2f}"
             if meta.get("type") == "document":
                 # 文档片段
                 filename = meta.get("filename", "unknown")
-                lines.append(f"- [文档] {mem.content} (来源: {filename})")
+                lines.append(f"- [文档] {mem.content} ({score}, 来源: {filename})")
             else:
                 # 对话记忆
                 category = meta.get("category", "general")
-                lines.append(f"- [记忆:{category}] {mem.content}")
+                lines.append(f"- [记忆:{category}] {mem.content} ({score})")
         return "\n".join(lines)

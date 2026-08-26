@@ -38,7 +38,7 @@ SUPPORTED_EXTENSIONS = {
 class DocumentIngester:
     """Loads documents, splits them into chunks with overlap, and stores in VectorStore."""
 
-    def __init__(self, vector_store: "VectorStore", chunk_size: int = 1000, chunk_overlap: int = 200):
+    def __init__(self, vector_store: "VectorStore", chunk_size: int = 500, chunk_overlap: int = 50):
         self.vector_store = vector_store
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,

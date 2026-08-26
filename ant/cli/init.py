@@ -50,6 +50,14 @@ default_agent: pickle
 #   enabled: true
 #   provider: chroma
 #   persist_directory: .memory
+#   chunk_size: 500              # ~500 tokens/chunk (zh: 1 char ≈ 1 token)
+#   chunk_overlap: 50            # overlap window avoids semantic breaks
+#   # Hybrid retrieval — vector + BM25 keyword dual index (OpenClaw-aligned)
+#   hybrid_enabled: true
+#   fusion_mode: rrf             # rrf | weighted (70/30 vector/text)
+#   score_threshold: 0.0         # drop weak fused results (0 = off)
+#   diversity_by_source: true    # top-1 per source first, then fill
+#   reranker: none               # none | cross_encoder (needs local model)
 
 # ── Security (all enabled by default; see README for the full set) ──
 sandbox:
@@ -142,8 +150,28 @@ def _read_default_agent(config_file: Path) -> str:
     return "default"
 
 
-def _scaffold(target: Path, agent_name: str = "default") -> list[Path]:
-    """Create the workspace scaffold. Returns created files (relative paths)."""
+def _template_default_agent() -> str:
+    """The default_agent the config template ships with — the fresh
+    scaffold must create a matching agents/ directory."""
+    try:
+        raw = yaml.safe_load(_CONFIG_TEMPLATE)
+        if isinstance(raw, dict):
+            name = raw.get("default_agent")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    except Exception:
+        pass
+    return "default"
+
+
+def _scaffold(target: Path, agent_name: str | None = None) -> list[Path]:
+    """Create the workspace scaffold. Returns created files (relative paths).
+
+    The agent directory is named after the template's default_agent so a
+    fresh workspace is always self-consistent.
+    """
+    if agent_name is None:
+        agent_name = _template_default_agent()
     created: list[Path] = []
 
     files = [

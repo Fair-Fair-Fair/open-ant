@@ -63,6 +63,22 @@ class ChromaVectorStore(VectorStore):
         self._collection.delete(ids=ids)
         logger.debug(f"Deleted {len(ids)} documents from ChromaDB")
 
+    def all_documents(self) -> list[MemoryDocument]:
+        """Return every document in the collection (id, content, metadata).
+
+        Used by the hybrid store to rebuild the BM25 keyword index when
+        its persisted state is missing or stale.
+        """
+        results = self._collection.get()
+        if not results or not results["ids"]:
+            return []
+        docs = []
+        for i, doc_id in enumerate(results["ids"]):
+            content = results["documents"][i] if results["documents"] else ""
+            meta = results["metadatas"][i] if results["metadatas"] else {}
+            docs.append(MemoryDocument(id=doc_id, content=content, metadata=meta))
+        return docs
+
     async def get(self, ids: list[str]) -> list[MemoryDocument]:
         """Retrieve documents by ids."""
         if not ids:

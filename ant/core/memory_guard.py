@@ -238,7 +238,10 @@ class MemoryGuard:
         retriever = self.context.memory_retriever
         assert retriever is not None
 
-        similar = await retriever.retrieve(
+        # Dedup/merge decisions compare SEMANTIC similarity — pure vector
+        # scores, not the hybrid fused score (keyword overlap shouldn't
+        # make two different facts look like the same memory).
+        similar = await retriever.retrieve_semantic(
             candidate["content"],
             top_k=self.context.config.memory.merge_top_k,
         )
