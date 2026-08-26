@@ -1,5 +1,13 @@
-"""Document ingestion pipeline: load → split → embed → store."""
+"""Document ingestion pipeline: load → split → embed → store.
 
+Phase 3A: embedding is batched via ``aembed`` (≤64 per call, one
+exponential-backoff retry) and degrades **per chunk** — a single chunk
+whose embedding fails is skipped with a warning while the rest of the
+file keeps flowing (design principle 3/11).  Deterministic chunk ids are
+preserved, so re-ingesting the same file is idempotent.
+"""
+
+import asyncio
 import hashlib
 import logging
 from pathlib import Path
@@ -21,9 +29,14 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 if TYPE_CHECKING:
-    from ant.provider.memory.base import VectorStore
+    from ant.provider.memory.base import EmbeddingProvider, VectorStore
 
 logger = logging.getLogger(__name__)
+
+# Phase 3: max chunks per aembed call (dashscope batch limits), and the
+# exponential-backoff delay for the single retry.
+EMBED_BATCH_SIZE = 64
+_EMBED_RETRY_BACKOFF_SECONDS = 1.0
 
 # 扩展支持的文件扩展名
 SUPPORTED_EXTENSIONS = {
@@ -37,8 +50,22 @@ SUPPORTED_EXTENSIONS = {
 class DocumentIngester:
     """Loads documents, splits them into chunks with overlap, and stores in VectorStore."""
 
-    def __init__(self, vector_store: "VectorStore", chunk_size: int = 500, chunk_overlap: int = 50):
+    def __init__(
+        self,
+        vector_store: "VectorStore",
+        chunk_size: int = 500,
+        chunk_overlap: int = 50,
+        embedding_provider: "EmbeddingProvider | None" = None,
+    ):
+        """*embedding_provider* enables the Phase-3 batch-aembed + per-chunk
+        degradation path; when omitted it is resolved from the store
+        (``vector_store.embedding_provider``, or the wrapped store inside
+        ``HybridMemoryStore``).  When none is available, ingestion falls
+        back to the legacy store-internal embedding (e.g. fake stores)."""
         self.vector_store = vector_store
+        self.embedding_provider = self._resolve_embedding_provider(
+            vector_store, embedding_provider
+        )
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -103,7 +130,9 @@ class DocumentIngester:
 
         suffix = path.suffix.lower()
         if suffix not in SUPPORTED_EXTENSIONS:
-            raise ValueError(f"Unsupported file type: {suffix} (supported: {SUPPORTED_EXTENSIONS})")
+            raise ValueError(
+                f"Unsupported file type: {suffix} (supported: {SUPPORTED_EXTENSIONS})"
+            )
 
         # 使用加载器获取 Document 列表
         docs = self._load_document(path)
@@ -143,14 +172,124 @@ class DocumentIngester:
             meta["type"] = "document"  # 标记为文档片段
             metadatas.append(meta)
 
-        # 关键修正：参数名必须为 documents，而不是 texts
-        await self.vector_store.add(documents=texts, metadatas=metadatas, ids=ids)
+        # Phase 3: batch aembed (≤64, 1 exponential-backoff retry) with
+        # chunk-level degradation — one bad chunk never sinks the file.
+        stored = await self._store_chunks(texts, metadatas, ids)
 
         logger.info(
-            "Ingested %s: %d chunks stored (source=%s)",
-            path.name, len(split_docs), base_source,
+            "Ingested %s: %d/%d chunks stored (source=%s)",
+            path.name, stored, len(split_docs), base_source,
         )
-        return len(split_docs)
+        return stored
+
+    def _resolve_embedding_provider(
+        self,
+        vector_store: "VectorStore",
+        explicit: "EmbeddingProvider | None",
+    ) -> "EmbeddingProvider | None":
+        """Locate the embedding provider used for batch embedding.
+
+        Explicit argument wins; otherwise the store's own provider is
+        reused (the HybridMemoryStore wraps the real store in ``_store``).
+        """
+        provider = explicit
+        if provider is None:
+            provider = getattr(vector_store, "embedding_provider", None)
+        if provider is None:
+            inner = getattr(vector_store, "_store", None)
+            provider = getattr(inner, "embedding_provider", None) if inner is not None else None
+        return provider
+
+    async def _store_chunks(
+        self,
+        texts: List[str],
+        metadatas: List[dict],
+        ids: List[str],
+    ) -> int:
+        """Batch-embed then store; return the number of chunks stored.
+
+        Chunks whose embedding fails are dropped with a warning (they are
+        excluded from the store call), so one bad chunk cannot sink the
+        rest of the file.  Without an embedding provider the legacy path
+        (store embeds internally) is used unchanged.
+        """
+        aembed = getattr(self.embedding_provider, "aembed", None)
+        if aembed is None:
+            # 关键修正：参数名必须为 documents，而不是 texts
+            await self.vector_store.add(documents=texts, metadatas=metadatas, ids=ids)
+            return len(texts)
+
+        vectors = await self._embed_batches(texts, aembed)
+        survivors = [i for i, v in enumerate(vectors) if v is not None]
+        dropped = len(texts) - len(survivors)
+        if dropped:
+            logger.warning("Dropped %d chunk(s) whose embedding failed", dropped)
+        if not survivors:
+            logger.error("All %d chunk(s) failed embedding — nothing stored", len(texts))
+            return 0
+
+        await self.vector_store.add(
+            documents=[texts[i] for i in survivors],
+            metadatas=[metadatas[i] for i in survivors],
+            ids=[ids[i] for i in survivors],
+        )
+        return len(survivors)
+
+    async def _embed_batches(
+        self,
+        texts: List[str],
+        aembed,
+    ) -> List[List[float] | None]:
+        """Embed in batches (≤64); one vector per text, None = dropped.
+
+        A batch that still fails after its retry degrades to per-chunk
+        attempts so a single failing chunk cannot take the rest of the
+        file down with it.
+        """
+        vectors: List[List[float] | None] = []
+        for start in range(0, len(texts), EMBED_BATCH_SIZE):
+            batch = texts[start : start + EMBED_BATCH_SIZE]
+            batch_vectors = await self._embed_batch(aembed, batch)
+            if batch_vectors is not None:
+                vectors.extend(batch_vectors)
+                continue
+            for text in batch:
+                try:
+                    one = await self._embed_batch(aembed, [text])
+                    vectors.append(one[0] if one else None)
+                except Exception as e:  # noqa: BLE001 — per-chunk degradation
+                    logger.warning(
+                        "Embedding failed for chunk %r...: %s", text[:80], e
+                    )
+                    vectors.append(None)
+        return vectors
+
+    @staticmethod
+    async def _embed_batch(aembed, batch: List[str]) -> List[List[float]] | None:
+        """One batch attempt with a single exponential-backoff retry.
+
+        Returns None when the batch failed after retries (caller decides
+        per-chunk degradation).
+        """
+        delay = _EMBED_RETRY_BACKOFF_SECONDS
+        for attempt in range(2):
+            try:
+                return await aembed(batch)
+            except Exception as e:  # noqa: BLE001
+                if attempt == 0:
+                    logger.warning(
+                        "Embedding batch of %d chunk(s) failed (%s); retrying in %.1fs",
+                        len(batch), e, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                logger.warning(
+                    "Embedding batch of %d chunk(s) failed after retry: %s",
+                    len(batch), e,
+                )
+                return None
+        return None  # pragma: no cover — loop always returns
 
     async def ingest_directory(self, dir_path: str, extra_metadata: dict | None = None) -> int:
         """Recursively ingest all supported files in a directory.
@@ -177,7 +316,15 @@ class DocumentIngester:
         """Delete all chunks belonging to a specific source file.
 
         Returns the number of chunks deleted (0 if no match).
+
+        Phase 3 (Qdrant): ``delete_by_filter`` deletes by payload filter
+        in one server-side step — no query-then-delete, no residue.
+        Legacy Chroma keeps the get(where=...)-then-delete path.
         """
+        deleter = getattr(self.vector_store, "delete_by_filter", None)
+        if deleter is not None:
+            return await deleter({"source": source})
+
         # 直接用 Chroma collection 的 where 过滤按 source 取回全部 chunk id，
         # 修复旧实现 query(top_k=1) 只删第一块、其余 chunk 永远残留的问题。
         collection = getattr(self.vector_store, "_collection", None)

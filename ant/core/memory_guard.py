@@ -1,47 +1,25 @@
-"""Memory guard for extracting and filtering long-term memories."""
+"""Memory guard for extracting and filtering long-term memories.
+
+Phase 3B: extraction now runs through ``ant.memory.extraction`` (tool-call
+constrained output, low temperature, per-item fault isolation).  Each
+candidate is resolved against the vector store (semantic dedup) and —
+when the Neo4j memory graph is enabled — against the graph (entity-level
+conflict detection + LLM arbitration + SUPERSEDES edges).
+"""
 
 import json
 import logging
+import uuid
 from typing import TYPE_CHECKING
 
 from litellm.types.completion import ChatCompletionMessageParam as Message
+
+from ant.memory.extraction import extract_memories as _constrained_extract_memories
 
 if TYPE_CHECKING:
     from ant.core.context import SharedContext
 
 logger = logging.getLogger(__name__)
-
-EXTRACTION_PROMPT = (
-    "You are a memory extraction system. Analyze the conversation below and extract "
-    "facts worth remembering long-term.\n\n"
-    "**CRITICAL**: Only extract information from the **USER's** messages. Ignore all "
-    "assistant (AI) responses, as they often contain information already stored in "
-    "documents or general knowledge.\n\n"
-    "Only extract information that has lasting value:\n"
-    "- User preferences, habits, and opinions\n"
-    "- Personal information (name, job, location, etc.)\n"
-    "- Project details and tech stack (when stated by user)\n"
-    "- Important decisions and conclusions made by user\n"
-    "- Corrections the user made about your behavior\n"
-    "\n"
-    "Do NOT extract:\n"
-    "- Transient conversation details (greetings, simple Q&A)\n"
-    "- Information already covered by tool results\n"
-    "- Trivial or context-dependent details\n"
-    "- Any facts that appear to be from assistant responses\n"
-    "\n"
-    "Conversation:\n"
-    "{conversation}\n"
-    "\n"
-    "Return a JSON array of objects with these fields:\n"
-    '- "content": the fact to remember (concise, self-contained sentence)\n'
-    '- "category": one of "user_pref", "personal", "project", "decision", "fact"\n'
-    '- "importance": integer 1-10 (only include items >= 5)\n'
-    '- "keywords": list of relevant keywords for retrieval\n'
-    "\n"
-    "If nothing is worth remembering, return an empty array: []\n"
-    "Return ONLY the JSON array, no other text."
-)
 
 RESOLVE_PROMPT = """
 You maintain a long-term memory database.
@@ -85,6 +63,28 @@ Rules:
 Output JSON only.
 """
 
+CONFLICT_RESOLVE_PROMPT = """
+You maintain a long-term memory graph. A new fact may contradict or refine
+existing facts that mention the same entities.
+
+Existing facts (older):
+{existing}
+
+New fact (candidate):
+{candidate}
+
+Decide what to do with the new fact. Choose exactly one action:
+
+- "keep_new": the new fact is correct and should be stored; the old facts
+  are outdated or wrong and will be marked superseded.
+- "keep_old": the new fact is a duplicate or less accurate; do not store it.
+- "merge": the new fact is a refined version of the old ones; store it and
+  mark the old facts superseded.
+
+Output JSON only, one object:
+{{"action": "keep_new" | "keep_old" | "merge", "reason": "short justification"}}
+"""
+
 
 class MemoryGuard:
     """Extracts and filters long-term memories from conversations."""
@@ -98,25 +98,31 @@ class MemoryGuard:
             self,
             messages: list[Message],
     ) -> list[dict]:
-        """Extract memorable facts from conversation messages."""
+        """Extract memorable facts from conversation messages.
 
-        conversation_text = self._serialize_messages(messages)
+        Extraction runs through ``ant.memory.extraction`` (tool-call
+        constrained output; low temperature).  Each candidate is then
+        resolved via ``_resolve_memory`` — vector-store semantic dedup plus,
+        when the memory graph is enabled, entity-level conflict arbitration.
+        A failed extraction call degrades to ``[]`` (never raises).
+        """
 
-        extraction_messages: list[Message] = [
-            {
-                "role": "user",
-                "content": EXTRACTION_PROMPT.format(
-                    conversation=conversation_text
-                ),
-            }
-        ]
-
-        response, _, _ = await self.llm.chat(extraction_messages, [])
-
-        candidates = self._parse_response(response)
+        try:
+            candidates = await _constrained_extract_memories(
+                self.llm, messages, self.context.config
+            )
+        except Exception as e:
+            logger.warning("Memory extraction failed, returning []: %s", e)
+            return []
 
         if not candidates:
             return []
+
+        # Every resolved memory gets a stable id up front: graph conflict
+        # arbitration needs it for mark_superseded(), and downstream
+        # ingestion (vector store + graph) can share one id per memory.
+        for candidate in candidates:
+            candidate.setdefault("memory_id", uuid.uuid4().hex)
 
         resolved: list[dict] = []
 
@@ -133,17 +139,6 @@ class MemoryGuard:
             )
 
         return resolved
-
-    def _serialize_messages(self, messages: list[Message]) -> str:
-        """Serialize messages to plain text for extraction."""
-        lines = []
-        for msg in messages:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if role in ("system", "tool"):
-                continue
-            lines.append(f"{role.upper()}: {content}")
-        return "\n".join(lines)
 
     def _parse_response(self, response: str) -> list[dict]:
         """
@@ -253,6 +248,14 @@ class MemoryGuard:
             candidate+_action   -> update
         """
 
+        # ── Phase 3B: graph conflict arbitration (before vector dedup) ──
+        # The graph object is read from the shared context with getattr so
+        # this works unchanged when the graph feature is not wired (None).
+        graph = getattr(self.context, "graph", None)
+        if graph is not None:
+            if await self._resolve_graph_conflict(candidate, graph) is None:
+                return None
+
         retriever = self.context.memory_retriever
         assert retriever is not None
 
@@ -338,6 +341,88 @@ class MemoryGuard:
         )
 
         return candidate
+
+    async def _resolve_graph_conflict(
+            self,
+            candidate: dict,
+            graph: object,
+    ) -> str | None:
+        """Arbitrate entity-level conflicts found in the memory graph.
+
+        Returns ``"keep"`` (store the candidate) or ``None`` (drop it).
+
+        The graph is an optional enhancement: any failure here (unreachable
+        Aura, schema drift, …) degrades to keeping the candidate — it must
+        never block memory storage (graceful degradation, warning + fallback).
+        On ``keep_new`` / ``merge`` the conflicting old facts are marked
+        superseded via ``mark_superseded``; that call is a safe no-op until
+        the new node is actually ingested, so it is harmless even when the
+        candidate is dropped downstream (e.g. by the vector dedup).
+        """
+        try:
+            conflicts = await graph.detect_conflicts(candidate)
+        except Exception as e:
+            logger.warning(
+                "Graph conflict detection failed, keeping candidate: %s", e
+            )
+            return "keep"
+
+        if not conflicts:
+            return "keep"
+
+        new_id = candidate.get("memory_id") or uuid.uuid4().hex
+        candidate["memory_id"] = new_id
+
+        existing = "\n".join(
+            f"- {c.get('memory_id')}: {c.get('content')} "
+            f"(category={c.get('category')}, importance={c.get('importance')})"
+            for c in conflicts
+        )
+
+        messages: list[Message] = [
+            {
+                "role": "user",
+                "content": CONFLICT_RESOLVE_PROMPT.format(
+                    existing=existing,
+                    candidate=candidate["content"],
+                ),
+            }
+        ]
+
+        try:
+            response, _, _ = await self.llm.chat(messages, [])
+            decision = self._parse_json(response)
+        except Exception as e:
+            logger.warning(
+                "Conflict arbitration failed, keeping candidate: %s", e
+            )
+            return "keep"
+
+        action = decision.get("action")
+
+        if action == "keep_old":
+            logger.info(
+                "Dropped memory (graph conflict, keep old): %s",
+                candidate["content"],
+            )
+            return None
+
+        if action in ("keep_new", "merge"):
+            # 仲裁采纳新记忆: 旧事实全部标记为被取代
+            for conflict in conflicts:
+                try:
+                    await graph.mark_superseded(conflict["memory_id"], new_id)
+                except Exception as e:
+                    logger.warning(
+                        "mark_superseded(%s -> %s) failed: %s",
+                        conflict["memory_id"],
+                        new_id,
+                        e,
+                    )
+            return "keep"
+
+        logger.warning("Unknown conflict action %r, keeping candidate", action)
+        return "keep"
 
     def _parse_json(self, response: str) -> dict:
         """

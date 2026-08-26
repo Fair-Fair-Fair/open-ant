@@ -70,6 +70,18 @@ class MemoryConfig(BaseModel):
     persist_directory: Path = Field(default=Path(".memory"))
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     embedding_provider: str | None = None  # "litellm" 或 "sentence_transformers"，空则自动判断
+
+    # ── Phase 3 backend selection (production defaults) ──
+    vector_backend: Literal["chroma", "qdrant"] = "qdrant"
+    """Vector store backend. ``qdrant`` is the Phase-3 production default
+    (dense + BM25 sparse dual vectors, server-side prefetch + RRF);
+    ``chroma`` keeps the legacy local backend for dev/offline."""
+    embedding_cache_enabled: bool = True
+    """Cache embedding vectors in Redis (sha256(text) → vector, 30-day TTL).
+    A Redis outage degrades to direct computation with a warning — it never
+    breaks retrieval (design principle 11)."""
+    graph_enabled: bool = True
+    """Neo4j memory graph (Phase 3C). False = vector-only memory."""
     top_k: int = Field(default=5, gt=0, le=20)
     extraction_threshold: int = Field(default=5, gt=0)
     min_importance: int = Field(default=5, ge=1, le=10)

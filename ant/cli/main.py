@@ -10,6 +10,7 @@ from ant.cli.chat import chat_command
 from ant.cli.doctor import doctor_command
 from ant.cli.ingest import ingest_command
 from ant.cli.init import init_command
+from ant.cli.migrate_chroma import migrate_chroma_command
 from ant.cli.server import server_command
 from ant.utils.config import Config
 
@@ -184,6 +185,22 @@ def doctor(
     failed).
     """
     doctor_command(ctx)
+
+
+@app.command("migrate-chroma")
+def migrate_chroma(
+    ctx: typer.Context,
+    workspace: Annotated[str | None, workspace_option("Path to workspace directory")] = None,
+) -> None:
+    """Migrate the legacy Chroma collection into Qdrant (one-time).
+
+    Reads every document from the local Chroma store, re-embeds in
+    batches and writes them into Qdrant with full payloads.  Idempotent —
+    re-running overwrites instead of duplicating.  Exit code 1 when the
+    source Chroma store is unavailable or Qdrant credentials are missing.
+    """
+    load_config(ctx)
+    migrate_chroma_command(ctx)
 
 
 if __name__ == "__main__":

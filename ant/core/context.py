@@ -113,6 +113,10 @@ class SharedContext:
     embedding_provider: EmbeddingProvider | None
     vector_store: VectorStore | None
 
+    # 3C: Neo4j memory graph (optional; None when disabled or when
+    # credentials are missing — retrieval degrades to vector-only).
+    graph: Any | None
+
     # 17 rag-document-ingestion
     doc_ingester: 'DocumentIngester | None'
 
@@ -268,25 +272,50 @@ class SharedContext:
         return outbox_writer
 
     def _init_memory(self, config: Config) -> None:
-        """Initialize RAG memory components if enabled."""
+        """Initialize RAG memory components if enabled.
+
+        Backend selection (Phase 3C):
+          * ``vector_backend == "qdrant"`` → a lazy ``QdrantStore`` (dense +
+            BM25 sparse, server-side RRF).  Construction never touches the
+            network; runtime failures raise ``QdrantStoreError`` which the
+            retriever catches and degrades from.
+          * otherwise → the legacy Chroma path, kept intact as the fallback
+            (plain store + optional HybridMemoryStore wrap).
+          * ``graph_enabled`` and complete Neo4j credentials → a lazy Neo4j
+            ``MemoryGraph``; otherwise ``self.graph = None``.
+        """
         if not config.memory.enabled:
             self.memory_guard = None
             self.memory_retriever = None
             self.embedding_provider = None
             self.vector_store = None
             self.doc_ingester = None
+            self.graph = None
             return
 
         self.embedding_provider = EmbeddingProvider.from_config(config)
-        self.vector_store = VectorStore.from_config(config, self.embedding_provider)
-        # Wrap in the hybrid store: vector + BM25 dual index, fused on query.
-        # Writes maintain both indexes transparently for all callers.
-        if config.memory.hybrid_enabled:
-            from ant.provider.memory.hybrid_store import HybridMemoryStore
-            self.vector_store = HybridMemoryStore(self.vector_store, config)
+
+        if getattr(config.memory, "vector_backend", "chroma") == "qdrant":
+            from ant.provider.memory.qdrant_store import QdrantStore
+
+            self.vector_store = QdrantStore(config, self.embedding_provider)
+        else:
+            self.vector_store = VectorStore.from_config(config, self.embedding_provider)
+            # Wrap in the hybrid store: vector + BM25 dual index, fused on
+            # query. Writes maintain both indexes transparently for all
+            # callers.
+            if config.memory.hybrid_enabled:
+                from ant.provider.memory.hybrid_store import HybridMemoryStore
+
+                self.vector_store = HybridMemoryStore(self.vector_store, config)
+
         # Create retriever before guard because guard depends on retriever
         self.memory_retriever = MemoryRetriever(self)
         self.memory_guard = MemoryGuard(self)
+
+        # Phase 3C: optional Neo4j memory graph — used by the guard for
+        # conflict arbitration and by the retriever for entity expansion.
+        self.graph = self._build_graph(config)
 
         # 17 document ingester
         self.doc_ingester = DocumentIngester(
@@ -294,6 +323,62 @@ class SharedContext:
             chunk_size=config.memory.chunk_size,
             chunk_overlap=config.memory.chunk_overlap,
         )
+
+    def _build_graph(self, config: Config) -> Any:
+        """Build the Neo4j MemoryGraph when enabled and credentials exist.
+
+        Returns ``None`` — with a WARNING naming only the masked URI — when
+        the graph is disabled, credentials are incomplete, or construction
+        fails.  The memory guard and retriever already degrade gracefully to
+        vector-only operation (design principle 11).
+        """
+        if not getattr(config.memory, "graph_enabled", False):
+            return None
+        settings = getattr(self, "_infra_settings", None)
+        if settings is None:
+            settings = InfraSettings()
+        uri = settings.neo4j_uri()
+        username = settings.neo4j_username()
+        password = settings.neo4j_password()
+        if not uri or not username or not password:
+            logger.warning(
+                "<context>:memory graph enabled but Neo4j credentials are "
+                "missing/incomplete in .env — memory graph disabled (uri=%s)",
+                settings.masked_neo4j_uri(),
+            )
+            return None
+
+        from ant.memory.graph import MemoryGraph
+
+        # Connection-pool knobs are read from settings when present (getattr
+        # fallback — settings without them use driver defaults).
+        driver_kwargs: dict[str, Any] = {}
+        for attr, kwarg in (
+            ("neo4j_max_connection_pool_size", "max_connection_pool_size"),
+            ("neo4j_connection_timeout", "connection_timeout"),
+            ("neo4j_max_connection_lifetime", "max_connection_lifetime"),
+            ("neo4j_connection_acquisition_timeout", "connection_acquisition_timeout"),
+        ):
+            value = getattr(settings, attr, None)
+            if value is not None:
+                driver_kwargs[kwarg] = value
+
+        try:
+            return MemoryGraph(
+                uri,
+                username,
+                password,
+                database=settings.neo4j_database(),
+                **driver_kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade, never crash startup
+            logger.warning(
+                "<context>:MemoryGraph construction failed (%s) — memory "
+                "graph disabled (uri=%s)",
+                type(exc).__name__,
+                settings.masked_neo4j_uri(),
+            )
+            return None
 
     async def auto_ingest_docs(self) -> None:
         """Auto-ingest docs_path on startup (called from the server's async context).
