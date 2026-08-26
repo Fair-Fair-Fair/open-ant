@@ -1,10 +1,9 @@
 """Base LLM provider abstraction."""
 
 from dataclasses import dataclass
-from typing import AsyncGenerator
-from typing import Any, Optional, cast
+from typing import Any, AsyncGenerator, Optional, cast
 
-from litellm import acompletion, Choices, TYPE_CHECKING
+from litellm import TYPE_CHECKING, Choices, acompletion
 from litellm.types.completion import ChatCompletionMessageParam as Message
 from litellm.types.utils import OpenAIChatCompletionFinishReason
 
@@ -123,7 +122,7 @@ class LLMProvider:
 
         finish_reason: Optional[StopReason] = None
 
-        final_content_pieces: list[str] = []  # 用于组装 content（虽然我们逐 token 发送，但可能也要知道最终内容）
+        final_content_pieces: list[str] = []  # 用于组装 content（虽然我们逐 token 发送，但可能也要知道最终内容）  # noqa: E501
 
         try:
             response = await acompletion(**request_kwargs)

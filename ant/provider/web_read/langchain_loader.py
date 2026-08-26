@@ -1,9 +1,10 @@
 """Web page reading provider using LangChain's WebBaseLoader."""
 
 import asyncio
+
 from langchain_community.document_loaders import WebBaseLoader
 
-from .base import WebReadProvider, ReadResult
+from .base import ReadResult, WebReadProvider
 
 
 class LangChainWebReadProvider(WebReadProvider):

@@ -172,7 +172,7 @@ class RouteCommand(Command):
     async def execute(self, args: str, session: "AgentSession") -> str:
         parts = args.strip().split(None, 1)
         if len(parts) != 2:
-            return "**Usage:** `/route <source_pattern> <agent_id>`\n\nExample: `/route platform-telegram:.* pickle`"
+            return "**Usage:** `/route <source_pattern> <agent_id>`\n\nExample: `/route platform-telegram:.* pickle`"  # noqa: E501
         pattern, agent_id = parts
         import re
         # Validate regex pattern
@@ -187,8 +187,8 @@ class RouteCommand(Command):
         except ValueError:
             return f"✗ Agent `{agent_id}` not found."
 
-        # Create and persist binding
-        session.shared_context.routing_table.persist_binding(parts, agent_id)
+        # Create and persist binding（传 pattern 字符串而非 parts 列表）
+        session.shared_context.routing_table.persist_binding(pattern, agent_id)
         return f"✓ Route bound: `{pattern}` → `{agent_id}`"
 
 

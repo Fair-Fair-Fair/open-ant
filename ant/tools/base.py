@@ -2,7 +2,6 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable
 
-
 if TYPE_CHECKING:
     from ant.core.agent import AgentSession
 

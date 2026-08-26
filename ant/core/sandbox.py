@@ -298,6 +298,7 @@ class CommandSandbox:
         self._backend = config.command.backend
         self._docker_image = config.command.docker_image
         self._docker_url = config.command.docker_url
+        self._docker_user = config.command.docker_user
         self._network_mode = config.command.network_mode
         self._memory_limit = config.command.memory_limit
         self._cpu_limit = config.command.cpu_limit
@@ -462,7 +463,8 @@ class CommandSandbox:
           - ephemeral (``--rm`` — destroyed after execution)
           - network-isolated (``--network none`` by default)
           - memory- and CPU-limited
-          - running as a non-root user
+          - running as the configured user (``--user`` when
+            ``sandbox.command.docker_user`` is set; non-root recommended)
           - mounting the workspace read-only
         """
         if not self._enabled:
@@ -486,6 +488,11 @@ class CommandSandbox:
             "--tmpfs", "/tmp",
             "--stop-timeout", "3",
         ])
+
+        # 非 root 运行：docker_user 配置后以指定用户（如 1000:1000）执行，
+        # 否则使用镜像默认用户（常见为 root）
+        if self._docker_user:
+            args.extend(["--user", self._docker_user])
 
         # Workspace: Copy-on-Start with session-level persistence.
         #   /workspace-ro  ← bind-mounted real workspace (read-only)
@@ -651,7 +658,7 @@ class NetworkSandbox:
         # Scheme check: only http/https
         if parsed.scheme not in ("http", "https"):
             raise SandboxViolation(
-                f"URL scheme '{parsed.scheme}' is not allowed. Only http:// and https:// are permitted.",
+                f"URL scheme '{parsed.scheme}' is not allowed. Only http:// and https:// are permitted.",  # noqa: E501
                 violation_type="network",
                 detail=url,
             )

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# ────────────────────────────────────────────────────────────
+#  open-ant launcher (Linux/macOS) — zero-install entry point.
+#  Works straight from a source copy: run `./open-ant init`.
+#  Requires Python 3.11+ with the dependencies installed:
+#    pip install .        (once, in any environment)
+# ────────────────────────────────────────────────────────────
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Preflight: is the `ant` package importable? ──
+if ! PYTHONPATH="$ROOT" python -c "import ant" >/dev/null 2>&1; then
+    echo
+    echo "[open-ant] Dependencies are not installed in this Python environment."
+    echo "  Fix:  cd \"$ROOT\" && pip install ."
+    echo
+    exit 1
+fi
+
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+exec python -m ant.cli.main "$@"

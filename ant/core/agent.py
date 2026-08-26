@@ -1,46 +1,55 @@
-import uuid
+import asyncio
 import json
 import logging
-import asyncio
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING
+
+# stream output support
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict
+
+from litellm.types.completion import (
+    ChatCompletionMessageParam as Message,
+)
 
 from ant.core.context_guard import ContextGuard
+from ant.core.events import EventSource
 from ant.core.session_fsm import SessionFSM, SessionPhase
 from ant.core.session_state import SessionState
-from ant.core.events import EventSource
-from ant.core.stream_pipeline import StreamPipeline, PipelineContext
+from ant.core.stream_pipeline import PipelineContext, StreamPipeline
 from ant.core.stream_stages import (
-    StreamValidationStage, StreamInputGuardStage, StreamObservabilityStage,
-    StreamContextBuildStage, StreamContextGuardStage, StreamLLMCallStage,
-    StreamToolExecutionStage, StreamOutputGuardStage, StreamTerminalStage,
+    StreamContextBuildStage,
+    StreamContextGuardStage,
+    StreamInputGuardStage,
+    StreamLLMCallStage,
+    StreamObservabilityStage,
+    StreamOutputGuardStage,
+    StreamTerminalStage,
+    StreamToolExecutionStage,
+    StreamValidationStage,
 )
 from ant.core.tracer import ExecutionTracer
 from ant.provider.llm import LLMProvider
-from ant.tools.registry import ToolRegistry
-from ant.tools.skill_tool import create_skill_tool
-from ant.tools.websearch_tool import create_websearch_tool
-from ant.tools.webread_tool import create_webread_tool
+
+# 17 document ingestion
+from ant.tools.doc_ingest_tool import ingest_document
 
 # 14 post-message tool
 from ant.tools.post_message_tool import create_post_message_tool
-# 15 agent-dispatch
-from ant.tools.subagent_tool import create_subagent_dispatch_tool
-# 17 document ingestion
-from ant.tools.doc_ingest_tool import ingest_document
+from ant.tools.registry import ToolRegistry
+
 # 18 knowledge search
 from ant.tools.retriever_knowledge_tool import retriever_knowledge
-from litellm.types.completion import (
-    ChatCompletionMessageParam as Message,
-    ChatCompletionMessageToolCallParam,
-)
-# stream output support
-from typing import AsyncGenerator, Dict, Any, Union
+from ant.tools.skill_tool import create_skill_tool
+
+# 15 agent-dispatch
+from ant.tools.subagent_tool import create_subagent_dispatch_tool
+from ant.tools.webread_tool import create_webread_tool
+from ant.tools.websearch_tool import create_websearch_tool
 
 if TYPE_CHECKING:
-    from ant.core.context import SharedContext
     from ant.core.agent_loader import AgentDef
+    from ant.core.context import SharedContext
     from ant.provider.llm import LLMToolCall
 
 
@@ -57,7 +66,7 @@ class Agent:
         # Build ToolGovernance if a tool_policy is configured on this agent.
         # Lazy import to avoid circular dependency: agent.py → registry →
         # sandbox → core.__init__ → agent.py.
-        from ant.tools.policy import ToolPolicy, ToolGovernance
+        from ant.tools.policy import ToolGovernance, ToolPolicy
 
         governance: ToolGovernance | None = None
         if self.agent_def.tool_policy:
@@ -253,6 +262,11 @@ class AgentSession:
         # Reset per-turn confirmation denials (new user message = new turn)
         self.shared_context.confirmation_broker.reset_turn(self.session_id)
 
+        # Reset per-turn tool call counts (new user message = new turn),
+        # otherwise max_calls_per_turn silently becomes a session total.
+        if self.tools._governance:
+            self.tools._governance.reset_turn_counts()
+
         await self._retrieve_memories()
 
         # ── FSM: enter active processing ──
@@ -383,11 +397,11 @@ class AgentSession:
             threshold = self.shared_context.config.memory.extraction_threshold
             if new_user_count < threshold:
                 logger.debug(
-                    f"Skipping memory extraction: {new_user_count} new user messages < threshold {threshold}"
+                    f"Skipping memory extraction: {new_user_count} new user messages < threshold {threshold}"  # noqa: E501
                 )
                 return
 
-            logger.info(f"Attempting memory extraction from {new_user_count} new user messages in session {self.session_id}")
+            logger.info(f"Attempting memory extraction from {new_user_count} new user messages in session {self.session_id}")  # noqa: E501
             memories = await memory_guard.extract_memories(new_messages)
             if not memories:
                 logger.info(f"No important memories extracted from session {self.session_id}")
@@ -435,7 +449,7 @@ class AgentSession:
                             metadatas=[new_meta],
                             ids=[target_id]  # 使用原ID
                         )
-                        logger.info(f"✨ Created memory (fallback) {target_id}: {mem['content']}")  # 新增日志
+                        logger.info(f"✨ Created memory (fallback) {target_id}: {mem['content']}")  # 新增日志  # noqa: E501
                 else:
                     # 普通创建
                     new_meta = {

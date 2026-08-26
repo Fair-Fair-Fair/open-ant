@@ -3,10 +3,11 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-# from ant.core.agent import Agent
-
-from .worker import Worker
 from ant.core.events import EventSource, InboundEvent
+
+# from ant.core.agent import Agent
+from .worker import Worker
+
 # from ant.utils.config import SourceSessionConfig
 
 if TYPE_CHECKING:

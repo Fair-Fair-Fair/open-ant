@@ -5,9 +5,11 @@ from typing import TYPE_CHECKING, cast
 
 from litellm import token_counter
 from litellm.types.completion import (
-    ChatCompletionMessageParam as Message,
     ChatCompletionAssistantMessageParam,
     ChatCompletionToolMessageParam,
+)
+from litellm.types.completion import (
+    ChatCompletionMessageParam as Message,
 )
 
 from ant.core.session_state import SessionState
@@ -19,25 +21,26 @@ if TYPE_CHECKING:
 # Default max size for tool result content before truncation
 MAX_TOOL_RESULT_CHARS = 1000
 
-COMPACT_PROMPT = """Your task is to create a detailed summary of the conversation so far, capturing the user's requests, your actions, and any important context needed to continue without losing information.
-
-Your summary should include the following sections:
-
-1. Primary Request and Intent: What did the user explicitly ask for? Capture the full scope of their request.
-
-2. Key Facts and User Preferences: Important information exchanged, decisions made, and user preferences or constraints discovered during the conversation.
-
-3. User Messages: List ALL user messages that are not tool results. These are critical for understanding the user's feedback and changing intent.
-
-4. Errors and Corrections: Any mistakes made, how they were fixed, and especially any corrections or feedback from the user about doing things differently.
-
-5. Current Work and Pending Tasks: What was being worked on immediately before this summary, and what tasks remain unfinished.
-
-Here is the conversation to summarize:
-
-{conversation}
-
-Please provide your summary following this structure. Be precise and thorough — the next response will only have access to this summary, not the original messages."""
+COMPACT_PROMPT = (
+    "Your task is to create a detailed summary of the conversation so far, capturing the "
+    "user's requests, your actions, and any important context needed to continue without "
+    "losing information.\n\n"
+    "Your summary should include the following sections:\n\n"
+    "1. Primary Request and Intent: What did the user explicitly ask for? Capture the "
+    "full scope of their request.\n\n"
+    "2. Key Facts and User Preferences: Important information exchanged, decisions made, "
+    "and user preferences or constraints discovered during the conversation.\n\n"
+    "3. User Messages: List ALL user messages that are not tool results. These are "
+    "critical for understanding the user's feedback and changing intent.\n\n"
+    "4. Errors and Corrections: Any mistakes made, how they were fixed, and especially "
+    "any corrections or feedback from the user about doing things differently.\n\n"
+    "5. Current Work and Pending Tasks: What was being worked on immediately before this "
+    "summary, and what tasks remain unfinished.\n\n"
+    "Here is the conversation to summarize:\n\n"
+    "{conversation}\n\n"
+    "Please provide your summary following this structure. Be precise and thorough — the "
+    "next response will only have access to this summary, not the original messages."
+)
 
 
 @dataclass
@@ -99,7 +102,10 @@ class ContextGuard:
                         f"[Truncated - original size: {original_size} chars]"
                     )
 
-                    msg = cast(ChatCompletionToolMessageParam, {**msg, "content": truncated_content})
+                    msg = cast(
+                        ChatCompletionToolMessageParam,
+                        {**msg, "content": truncated_content},
+                    )
 
             result.append(msg)
         return result

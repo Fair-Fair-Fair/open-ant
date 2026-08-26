@@ -25,7 +25,7 @@ def create_post_message_tool(context: "SharedContext") -> BaseTool | None:
 
     @tool(
         name="post_message",
-        description="Send a message to the user via the default messaging platform. Use this to proactively notify the user about completed tasks, cron results, or important updates.",
+        description="Send a message to the user via the default messaging platform. Use this to proactively notify the user about completed tasks, cron results, or important updates.",  # noqa: E501
         parameters={
             "type": "object",
             "properties": {

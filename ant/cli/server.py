@@ -6,9 +6,9 @@ import typer
 from rich.console import Console
 from rich.text import Text
 
-from ant.ui.logo import print_logo
 from ant.core.context import SharedContext
 from ant.server.server import Server
+from ant.ui.logo import print_logo
 from ant.utils.logging import setup_logging
 
 

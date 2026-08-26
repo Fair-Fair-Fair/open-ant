@@ -1,4 +1,5 @@
 """FastAPI application with Websocket support"""
+import logging
 import re
 from pathlib import Path
 
@@ -8,9 +9,16 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from ant.core.context import SharedContext
 
+logger = logging.getLogger(__name__)
+
 _URL_RE = re.compile(r"https?://[^\s)\]]+")
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True if *host* binds to the local machine only."""
+    return host in ("127.0.0.1", "localhost", "::1")
 
 
 def create_app(context: SharedContext) -> FastAPI:
@@ -21,6 +29,21 @@ def create_app(context: SharedContext) -> FastAPI:
         version="0.1.0"
     )
     app.state.context = context
+
+    # Phase 0 temporary guard (improve.md #10): there is NO authentication yet
+    # (full auth lands in Phase 4), so warn loudly when the API is reachable
+    # from outside the local machine.  Default host stays 127.0.0.1.
+    api = context.config.api
+    if api is not None and not _is_loopback_host(api.host):
+        logger.warning("=" * 72)
+        logger.warning(
+            "SECURITY WARNING: api.host=%s is NOT loopback-only. The "
+            "WebSocket/HTTP API has NO authentication yet — anyone who can "
+            "reach this port can read every conversation and act as any "
+            "user. Keep host at 127.0.0.1 (default) until auth lands.",
+            api.host,
+        )
+        logger.warning("=" * 72)
 
     # Enable CORS for web clients
     app.add_middleware(

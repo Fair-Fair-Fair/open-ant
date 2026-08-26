@@ -24,6 +24,9 @@ class Binding:
     pattern: Pattern = field(init=False)
 
     def __post_init__(self):
+        # 非字符串 value（历史 /route bug 存过 list）直接判为构造错误
+        if not isinstance(self.value, str):
+            raise TypeError(f"Binding.value 必须是字符串，got {type(self.value).__name__}")
         self.pattern = re.compile(f"^{self.value}$")
         self.tier = self._compute_tier()
 
@@ -47,16 +50,25 @@ class RoutingTable:
     def _load_bindings(self) -> list[Binding]:
         """Load and sort bindings from config, Cached until config changes"""
         bindings_data = self.context.config.routing.get("bindings", [])
-        current_hash = hash(tuple((b["agent"], b["value"]) for b in bindings_data))
+        # 历史脏数据（如 /route 曾把 list 存进 value）不可 hash，退化为每次重建
+        try:
+            current_hash = hash(tuple((b["agent"], b["value"]) for b in bindings_data))
+        except TypeError:
+            current_hash = None
 
         if self.bindings is not None and self._config_hash == current_hash:
             return self.bindings
 
-        # Rebuild
-        bindings_with_order = [
-            (Binding(agent=b["agent"], value=b["value"]), i)
-            for i, b in enumerate(bindings_data)
-        ]
+        # Rebuild；单个绑定编译失败（坏正则 / 非字符串）只跳过它，不让路由整体崩溃
+        logger = logging.getLogger(__name__)
+        bindings_with_order = []
+        for i, b in enumerate(bindings_data):
+            try:
+                binding = Binding(agent=b["agent"], value=b["value"])
+            except (re.error, TypeError) as e:
+                logger.warning(f"跳过无效路由绑定 {b.get('value')!r}: {e}")
+                continue
+            bindings_with_order.append((binding, i))
         bindings_with_order.sort(key=lambda x: (x[0].tier, x[1]))
         self.bindings = [b for b, _ in bindings_with_order]
         self._config_hash = current_hash
@@ -80,7 +92,7 @@ class RoutingTable:
             if existing:
                 return source_session.session_id
             logger = logging.getLogger(__name__)
-            logger.warning(f"Cached session {source_session.session_id} not found in history, creating new")
+            logger.warning(f"Cached session {source_session.session_id} not found in history, creating new")  # noqa: E501
             self.context.config.sources.pop(source_str, None)
 
         agent_id = self.resolve(source_str)
@@ -114,7 +126,7 @@ class RoutingTable:
             if source_str in self.context.config.sources:
                 del self.context.config.sources[source_str]
                 self.context.config.set_runtime(
-                    f"sources", self.context.config.sources
+                    "sources", self.context.config.sources
                 )
         else:
             self.context.config.set_runtime(

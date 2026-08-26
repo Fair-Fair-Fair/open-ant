@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import chromadb
 
-from .base import MemoryDocument, VectorStore, EmbeddingProvider
+from .base import EmbeddingProvider, MemoryDocument, VectorStore
 
 if TYPE_CHECKING:
     from ant.utils.config import Config

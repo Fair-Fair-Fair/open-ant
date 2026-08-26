@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ant.core.events import ConfirmationRequestEvent, ConfirmationResponseEvent, AgentEventSource
+from ant.core.events import AgentEventSource, ConfirmationRequestEvent
 
 if TYPE_CHECKING:
     from ant.core.context import SharedContext

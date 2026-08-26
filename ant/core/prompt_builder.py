@@ -1,5 +1,4 @@
 """Prompt builder that assembles system prompt from layers"""
-import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -92,9 +91,9 @@ class PromptBuilder:
     def _build_channel_hint(self, source: "EventSource") -> str:
         """Build platform hint"""
         if source.is_cron:
-            return "You are running as a background cron job. Your response will not be sent to user directly."
+            return "You are running as a background cron job. Your response will not be sent to user directly."  # noqa: E501
         if source.is_agent:
-            return "You are running as a dispatched subagent. Your response will be sent to main agent."
+            return "You are running as a dispatched subagent. Your response will be sent to main agent."  # noqa: E501
         elif source.is_platform:
             return f"You are responding via {source.platform_name}."
         else:

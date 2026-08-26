@@ -1,14 +1,14 @@
 """Discord channel implementation."""
 
 import asyncio
-from dataclasses import dataclass
 import logging
-from typing import Callable, Awaitable
+from dataclasses import dataclass
+from typing import Awaitable, Callable
 
 import discord
 
-from ant.core.events import EventSource
 from ant.channel.base import Channel
+from ant.core.events import EventSource
 from ant.utils.config import DiscordConfig
 
 logger = logging.getLogger(__name__)

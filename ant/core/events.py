@@ -1,9 +1,9 @@
 """Event types and data classes for the event bus."""
 
 import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
-from abc import ABC, abstractmethod
 
 
 class EventSource(ABC):

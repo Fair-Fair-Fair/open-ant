@@ -11,20 +11,24 @@ import asyncio
 import json
 import logging
 from dataclasses import replace  # 用于不可变 dataclass 的字段替换（如重试时递增 retry_count）
-from typing import Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 
-from .worker import SubscribeWorker  # 基类：提供事件订阅型 Worker 的基础能力
 from ant.core.agent import Agent  # Agent 核心类，封装 LLM 对话逻辑
 from ant.core.events import (
-    InboundEvent, OutboundEvent, AgentEventSource,
-    DispatchEvent, DispatchResultEvent, StreamChunkEvent,
+    AgentEventSource,
+    DispatchEvent,
+    DispatchResultEvent,
+    InboundEvent,
+    OutboundEvent,
+    StreamChunkEvent,
 )
-
 from ant.utils.def_loader import DefNotFoundError  # Agent/Skill 定义加载失败的异常
 
+from .worker import SubscribeWorker  # 基类：提供事件订阅型 Worker 的基础能力
+
 if TYPE_CHECKING:
-    from ant.core.context import SharedContext
     from ant.core.agent import AgentDef
+    from ant.core.context import SharedContext
 
 # 会话失败后的最大重试次数；超过此次数将直接返回错误给用户
 MAX_RETRIES = 3
@@ -42,8 +46,10 @@ class AgentWorker(SubscribeWorker):
 
     def __init__(self, context: "SharedContext") -> None:
         """初始化 AgentWorker
+
         Args:
-            context: 全局上下文对象，包含 eventbus、history_store、agent_loader、command_registry 等共享组件
+            context: 全局上下文对象，包含 eventbus、history_store、agent_loader、
+                command_registry 等共享组件
         """
         super().__init__(context)
 
@@ -77,22 +83,25 @@ class AgentWorker(SubscribeWorker):
             logger.warning(f"Session not found: {event.session_id}, falling back to routing")
             agent_id = self.context.routing_table.resolve(str(event.source))
 
+        # 先初始化为 None，避免 load 抛异常时 except 分支引用未赋值的局部变量（UnboundLocalError）
+        agent_def = None
         try:
             # 加载 Agent 定义（包含 system prompt、可用工具、模型配置等）
             agent_def = self.context.agent_loader.load(agent_id)
         except DefNotFoundError as e:
             # Agent 定义不存在时，向用户返回错误信息并终止处理
             logger.error(f"Agent not found: {agent_id}: {e}")
+            # load 失败时 agent_def 为 None，判空后回退使用解析出的 agent_id 作为响应来源
             return await self._emit_response(
                 event,
                 "",
-                agent_def.id,
+                agent_def.id if agent_def is not None else agent_id,
                 str(e)
             )
 
         # 以异步任务方式启动会话执行
         # 使用 create_task 而非 await，使事件分发不被阻塞，可以立即处理下一个事件
-        # 注意这里是 create_task 而非 await，这意味着 dispatch_event 会瞬间返回，不会阻塞 EventBus 的事件分发循环。
+        # 注意这里是 create_task 而非 await，这意味着 dispatch_event 会瞬间返回，不会阻塞 EventBus 的事件分发循环。  # noqa: E501
         asyncio.create_task(self.exec_session(event, agent_def))
 
     async def exec_session(self, event: ProcessableEvent, agent_def: "AgentDef") -> None:

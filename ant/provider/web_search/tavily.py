@@ -1,7 +1,8 @@
 from typing import TYPE_CHECKING
+
 import httpx
 
-from .base import WebSearchProvider, SearchResult
+from .base import SearchResult, WebSearchProvider
 
 if TYPE_CHECKING:
     from ant.utils.config import Config

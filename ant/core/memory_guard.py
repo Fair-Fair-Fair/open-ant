@@ -2,7 +2,6 @@
 
 import json
 import logging
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from litellm.types.completion import ChatCompletionMessageParam as Message
@@ -12,34 +11,37 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-EXTRACTION_PROMPT = """You are a memory extraction system. Analyze the conversation below and extract facts worth remembering long-term.
-
-**CRITICAL**: Only extract information from the **USER's** messages. Ignore all assistant (AI) responses, as they often contain information already stored in documents or general knowledge.
-
-Only extract information that has lasting value:
-- User preferences, habits, and opinions
-- Personal information (name, job, location, etc.)
-- Project details and tech stack (when stated by user)
-- Important decisions and conclusions made by user
-- Corrections the user made about your behavior
-
-Do NOT extract:
-- Transient conversation details (greetings, simple Q&A)
-- Information already covered by tool results
-- Trivial or context-dependent details
-- Any facts that appear to be from assistant responses
-
-Conversation:
-{conversation}
-
-Return a JSON array of objects with these fields:
-- "content": the fact to remember (concise, self-contained sentence)
-- "category": one of "user_pref", "personal", "project", "decision", "fact"
-- "importance": integer 1-10 (only include items >= 5)
-- "keywords": list of relevant keywords for retrieval
-
-If nothing is worth remembering, return an empty array: []
-Return ONLY the JSON array, no other text."""
+EXTRACTION_PROMPT = (
+    "You are a memory extraction system. Analyze the conversation below and extract "
+    "facts worth remembering long-term.\n\n"
+    "**CRITICAL**: Only extract information from the **USER's** messages. Ignore all "
+    "assistant (AI) responses, as they often contain information already stored in "
+    "documents or general knowledge.\n\n"
+    "Only extract information that has lasting value:\n"
+    "- User preferences, habits, and opinions\n"
+    "- Personal information (name, job, location, etc.)\n"
+    "- Project details and tech stack (when stated by user)\n"
+    "- Important decisions and conclusions made by user\n"
+    "- Corrections the user made about your behavior\n"
+    "\n"
+    "Do NOT extract:\n"
+    "- Transient conversation details (greetings, simple Q&A)\n"
+    "- Information already covered by tool results\n"
+    "- Trivial or context-dependent details\n"
+    "- Any facts that appear to be from assistant responses\n"
+    "\n"
+    "Conversation:\n"
+    "{conversation}\n"
+    "\n"
+    "Return a JSON array of objects with these fields:\n"
+    '- "content": the fact to remember (concise, self-contained sentence)\n'
+    '- "category": one of "user_pref", "personal", "project", "decision", "fact"\n'
+    '- "importance": integer 1-10 (only include items >= 5)\n'
+    '- "keywords": list of relevant keywords for retrieval\n'
+    "\n"
+    "If nothing is worth remembering, return an empty array: []\n"
+    "Return ONLY the JSON array, no other text."
+)
 
 RESOLVE_PROMPT = """
 You maintain a long-term memory database.
@@ -187,29 +189,33 @@ class MemoryGuard:
         for item in data:
 
             if not isinstance(item, dict):
+                logger.warning("Skipping malformed memory item (not a dict): %r", item)
                 continue
 
-            content = item.get("content", "").strip()
+            try:
+                content = item.get("content", "").strip()
 
-            if not content:
+                if not content:
+                    continue
+
+                importance = self._safe_importance(item.get("importance", 5))
+
+                if (
+                        importance
+                        < self.context.config.memory.min_importance
+                ):
+                    continue
+
+                category = item.get("category", "fact")
+
+                keywords = item.get("keywords", [])
+
+                if not isinstance(keywords, list):
+                    keywords = []
+            except (AttributeError, TypeError, ValueError) as e:
+                # 单条解析失败不影响同批其他条目：丢弃该条并告警
+                logger.warning("Skipping invalid memory item %r: %s", item, e)
                 continue
-
-            importance = int(
-                item.get("importance", 5)
-            )
-
-            if (
-                    importance
-                    < self.context.config.memory.min_importance
-            ):
-                continue
-
-            category = item.get("category", "fact")
-
-            keywords = item.get("keywords", [])
-
-            if not isinstance(keywords, list):
-                keywords = []
 
             valid.append(
                 {
@@ -221,6 +227,18 @@ class MemoryGuard:
             )
 
         return valid
+
+    @staticmethod
+    def _safe_importance(value: object, default: int = 5) -> int:
+        """安全转换 importance：int() 裸转遇 "high"/5.5 等值会抛异常，失败时兜底默认值。"""
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            logger.warning(
+                "Invalid importance value %r, defaulting to %d",
+                value, default,
+            )
+            return default
 
     async def _resolve_memory(
             self,

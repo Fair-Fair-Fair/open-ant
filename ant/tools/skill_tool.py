@@ -46,6 +46,6 @@ def create_skill_tool(skill_loader: "SkillLoader"):
             skill_def = skill_loader.load_skill(skill_name)
             return skill_def.content
         except Exception:
-            return f"Error: Skill '{skill_name}' not found. It may have been removed or is unavailable."
+            return f"Error: Skill '{skill_name}' not found. It may have been removed or is unavailable."  # noqa: E501
 
     return skill_tool

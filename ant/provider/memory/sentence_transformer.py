@@ -1,7 +1,7 @@
 """SentenceTransformer embedding provider for local models."""
 
-import os
 import logging
+import os
 from typing import TYPE_CHECKING
 
 from .base import EmbeddingProvider

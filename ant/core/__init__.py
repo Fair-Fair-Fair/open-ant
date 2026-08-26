@@ -2,8 +2,8 @@
 
 from .agent import Agent, AgentSession
 from .agent_loader import (
-    AgentLoader,
     AgentDef,
+    AgentLoader,
 )
 from .history import HistoryMessage, HistorySession, HistoryStore
 

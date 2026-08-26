@@ -17,15 +17,22 @@ if TYPE_CHECKING:
               "path": {
                   "type": "string",
                   "description": "The path to the text file to read"
+              },
+              "max_chars": {
+                  "type": "integer",
+                  "description": "Maximum characters to return. Larger files are truncated with a notice."  # noqa: E501
               }
           },
           "required": ["path"]
       })
-async def read_file(path: str, session: "AgentSession") -> str:
-    """Read and return the contents of a file at the given path."""
+async def read_file(path: str, session: "AgentSession", max_chars: int = 50000) -> str:
+    """Read and return the contents of a file at the given path.
+
+    超过 max_chars 的内容被截断并附加提示，防止大文件撑爆上下文。
+    """
     session.shared_context.sandbox.path.validate_read(path)
     try:
-        return Path(path).read_text()
+        content = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return f"Error: file not found: {path}"
     except PermissionError:
@@ -34,6 +41,14 @@ async def read_file(path: str, session: "AgentSession") -> str:
         return f"Error: Path is a directory, not a file: {path}"
     except Exception as e:
         return f"Error reading file: {e}"
+
+    if len(content) > max_chars:
+        return (
+            f"{content[:max_chars]}\n\n"
+            f"[Truncated — file is {len(content):,} chars, "
+            f"limit is {max_chars:,} chars]"
+        )
+    return content
 
 
 @tool(name="write",
@@ -56,7 +71,7 @@ async def write_file(path: str, content: str, session: "AgentSession") -> str:
     """Write content to a file at the given path."""
     session.shared_context.sandbox.path.validate_write(path)
     try:
-        Path(path).write_text(content)
+        Path(path).write_text(content, encoding="utf-8")
         return f"Successfully wrote to: {path}"
     except PermissionError:
         return f"Error: Permission denied writing to: {path}"
@@ -90,11 +105,11 @@ async def edit_file(path: str, old_string: str, new_string: str, session: "Agent
     """Edit a file by replacing a string with new content."""
     session.shared_context.sandbox.path.validate_write(path)
     try:
-        content = Path(path).read_text()
+        content = Path(path).read_text(encoding="utf-8")
         if old_string not in content:
             return f"Error: '{old_string}' not found in file: {path}"
         new_content = content.replace(old_string, new_string)
-        Path(path).write_text(new_content)
+        Path(path).write_text(new_content, encoding="utf-8")
         return f"Successfully edited: {path}"
     except FileNotFoundError:
         return f"Error: File not found: {path}"

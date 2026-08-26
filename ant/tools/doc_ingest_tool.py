@@ -12,9 +12,9 @@ if TYPE_CHECKING:
 @tool(
     name="ingest_document",
     description="Load a file or directory into the long-term memory knowledge base. "
-                "⚠️ ONLY use this tool when the user EXPLICITLY asks to import/load/ingest documents into the knowledge base. "
+                "⚠️ ONLY use this tool when the user EXPLICITLY asks to import/load/ingest documents into the knowledge base. "  # noqa: E501
                 "Do NOT use this tool to answer questions or search for information. "
-                "If the user asks a question about stored knowledge, use the search_knowledge tool instead.",
+                "If the user asks a question about stored knowledge, use the search_knowledge tool instead.",  # noqa: E501
     parameters={
         "type": "object",
         "properties": {

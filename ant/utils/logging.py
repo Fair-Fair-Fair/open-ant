@@ -2,8 +2,9 @@
 
 import logging
 import sys
-from ant.utils.config import Config
 from logging.handlers import RotatingFileHandler
+
+from ant.utils.config import Config
 
 # Third-party libraries that spam the console — keep them at WARNING+.
 # (Some of them configure root handlers via basicConfig() at import time;

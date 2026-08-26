@@ -171,6 +171,8 @@ class CommandSandboxConfig(BaseModel):
     docker_url: str | None = None
     """Docker daemon URL. ``None`` = local daemon via ``docker`` CLI.
     Set to ``ssh://user@host`` for a remote Docker host."""
+    docker_user: str | None = None
+    """容器内运行用户，如 ``1000:1000`` 或 ``nobody``；``None`` = 镜像默认用户。"""
     network_mode: str = "none"
     """Container network mode. ``none`` = completely isolated (recommended)."""
     memory_limit: str = "256m"

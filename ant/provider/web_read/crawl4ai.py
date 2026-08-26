@@ -1,9 +1,10 @@
 """Crawl4AI provider for web page reading."""
 
 import asyncio
+
 from crawl4ai import AsyncWebCrawler
 
-from .base import WebReadProvider, ReadResult
+from .base import ReadResult, WebReadProvider
 
 
 class Crawl4AIProvider(WebReadProvider):

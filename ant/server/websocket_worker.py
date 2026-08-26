@@ -1,22 +1,26 @@
 """Websocket worker for broadcasting evetnts to connected clients"""
+import dataclasses
 import logging
 import time
-import dataclasses
 from typing import TYPE_CHECKING, Set
-
-from ant.core.agent import Agent
 
 from fastapi import WebSocket
 from fastapi.websockets import WebSocketDisconnect
-from pydantic import ValidationError, BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from .worker import SubscribeWorker
+from ant.core.agent import Agent
 from ant.core.events import (
-    EventSource, Event, InboundEvent, OutboundEvent,
-    StreamChunkEvent, ConfirmationRequestEvent,
-    ConfirmationResponseEvent, WebSocketEventSource,
+    ConfirmationRequestEvent,
+    Event,
+    EventSource,
+    InboundEvent,
+    OutboundEvent,
+    StreamChunkEvent,
+    WebSocketEventSource,
 )
 from ant.utils.config import SourceSessionConfig
+
+from .worker import SubscribeWorker
 
 if TYPE_CHECKING:
     from ant.core.context import SharedContext

@@ -1,4 +1,5 @@
 """Tool registry for managing available tools."""
+import logging
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -6,9 +7,10 @@ from ant.tools.base import BaseTool
 from ant.tools.builtin_tools import bash, edit_file, read_file, write_file
 from ant.tools.policy import ToolGovernance
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from ant.core.agent import AgentSession
-    from ant.core.sandbox import SandboxViolation
 
 
 class ToolRegistry:
@@ -42,7 +44,8 @@ class ToolRegistry:
 
         tool = self.get(name)
         if tool is None:
-            raise ValueError(f"tool not found name: {name}")
+            logger.warning("Tool not found: %s", name)
+            return f"Tool not found: {name}"
 
         if self._governance:
             allowed, reason = self._governance.check_permission(name, session)
@@ -65,7 +68,10 @@ class ToolRegistry:
             elapsed = time.time() - start
             if self._governance:
                 self._governance.record_call(name, kwargs, str(e), elapsed)
-            raise
+            # 与内置工具的错误回传策略统一：把错误作为字符串返回给 LLM，
+            # 而不是 re-raise 炸掉整轮；完整 traceback 记入日志，不静默吞。
+            logger.exception("Tool execution error: %s", name)
+            return f"Tool execution error: {e}"
 
     @classmethod
     def with_builtins(cls, governance: ToolGovernance | None = None) -> "ToolRegistry":

@@ -57,9 +57,15 @@ class CommandRegistry:
     def with_builtins(cls) -> "CommandRegistry":
         """Create registry with built-in commands registered"""
         from ant.core.commands.handlers import (
-            HelpCommand, SkillsCommand, SessionCommand,
-            ContextCommand, CompactCommand,
-            ClearCommand, AgentCommand, RouteCommand, BindingCommand
+            AgentCommand,
+            BindingCommand,
+            ClearCommand,
+            CompactCommand,
+            ContextCommand,
+            HelpCommand,
+            RouteCommand,
+            SessionCommand,
+            SkillsCommand,
         )
 
         registry = cls()

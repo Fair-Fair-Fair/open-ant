@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
     name="retriever_knowledge",
     description="Search the long-term knowledge base (RAG memory store) for relevant information. "
                 "Use this tool when the user asks about stored knowledge, documents, or memories. "
-                "This is a READ-ONLY search tool — it does NOT modify or add to the knowledge base. "
+                "This is a READ-ONLY search tool — it does NOT modify or add to the knowledge base. "  # noqa: E501
                 "Do NOT use ingest_document to answer questions; use this tool instead.",
     parameters={
         "type": "object",

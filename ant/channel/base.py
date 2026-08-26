@@ -1,7 +1,7 @@
 """Abstract base class for channel implementations"""
 import logging
 from abc import ABC, abstractmethod
-from typing import Callable, Awaitable, Generic, TypeVar, Any
+from typing import Any, Awaitable, Callable, Generic, TypeVar
 
 from ant.core.events import EventSource
 from ant.utils.config import Config

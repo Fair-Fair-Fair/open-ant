@@ -4,6 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from litellm import aembedding
+
 from .base import EmbeddingProvider
 
 if TYPE_CHECKING:

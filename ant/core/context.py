@@ -1,35 +1,31 @@
-import asyncio
 import logging
-
-from ant.core.agent_loader import AgentLoader
-from ant.core.commands.registry import CommandRegistry
-from ant.core.history import HistoryStore
-from ant.core.skill_loader import SkillLoader
-from ant.core.eventbus import EventBus
-from ant.utils.config import Config
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ant.channel.base import Channel
+from ant.core.agent_loader import AgentLoader
+from ant.core.commands.registry import CommandRegistry
+from ant.core.eventbus import EventBus
+from ant.core.history import HistoryStore
+from ant.core.skill_loader import SkillLoader
+from ant.utils.config import Config
 
-from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ant.server.websocket_worker import WebSocketWorker
 
-from ant.core.routing import RoutingTable
-
-from ant.core.sandbox import Sandbox
-from ant.core.guardrails import Guardrails
 from ant.core.confirmation import ConfirmationBroker
 
 # 12-cron-heartbeat
 from ant.core.cron_loader import CronLoader
-
-# 13 multi-layer-prompt
-from ant.core.prompt_builder import PromptBuilder
+from ant.core.guardrails import Guardrails
 
 # 16-rag-memory
 from ant.core.memory_guard import MemoryGuard
 from ant.core.memory_retriever import MemoryRetriever
+
+# 13 multi-layer-prompt
+from ant.core.prompt_builder import PromptBuilder
+from ant.core.routing import RoutingTable
+from ant.core.sandbox import Sandbox
 from ant.provider.memory.base import EmbeddingProvider, VectorStore
 
 # 17-rag-document-ingestion
@@ -135,18 +131,29 @@ class SharedContext:
             chunk_overlap=config.memory.chunk_overlap,
         )
 
-        # Auto-ingest docs_path on startup if configured
-        if config.memory.docs_path:
-            docs_path = config.workspace / config.memory.docs_path
+    async def auto_ingest_docs(self) -> None:
+        """Auto-ingest docs_path on startup (called from the server's async context).
+
+        The old ``asyncio.get_event_loop().run_until_complete(...)`` here ran
+        inside ``__init__`` and raised RuntimeError whenever SharedContext was
+        built from inside a running event loop (improve.md #22). Ingest failure
+        is logged but must not take down server startup.
+        """
+        if not self.config.memory.docs_path:
+            return
+        if self.doc_ingester is None:
+            logger.warning("<context>:Memory disabled, skip auto-ingest of docs")
+            return
+
+        docs_path = self.config.workspace / self.config.memory.docs_path
+        try:
             if docs_path.is_file():
                 logger.info("<context>:Auto-ingesting document: %s", docs_path)
-                asyncio.get_event_loop().run_until_complete(
-                    self.doc_ingester.ingest_file(str(docs_path))
-                )
+                await self.doc_ingester.ingest_file(str(docs_path))
             elif docs_path.is_dir():
                 logger.info("<context>:Auto-ingesting documents from: %s", docs_path)
-                asyncio.get_event_loop().run_until_complete(
-                    self.doc_ingester.ingest_directory(str(docs_path))
-                )
+                await self.doc_ingester.ingest_directory(str(docs_path))
             else:
                 logger.warning("<context>:Configured docs_path does not exist: %s", docs_path)
+        except Exception:
+            logger.exception("<context>:Auto-ingest failed for %s", docs_path)

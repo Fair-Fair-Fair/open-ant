@@ -8,11 +8,12 @@ from typing import TYPE_CHECKING, Any
 
 from ant.core.events import EventSource, OutboundEvent
 from ant.core.history import HistorySession
+
 from .worker import SubscribeWorker
 
 if TYPE_CHECKING:
-    from ant.core.context import SharedContext
     from ant.channel.base import Channel
+    from ant.core.context import SharedContext
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,7 @@ class DeliveryWorker(SubscribeWorker):
                 return None
         else:
             self.logger.warning(
-                f"No platform for session {session_info.id} and no default_delivery_source configured"
+                f"No platform for session {session_info.id} and no default_delivery_source configured"  # noqa: E501
             )
             return None
 
@@ -170,10 +171,24 @@ class DeliveryWorker(SubscribeWorker):
             )
 
             channel = self._get_channel(source.platform_name)
-            if channel:
-                success = await self._deliver_with_retry(chunks, source, channel)
-                if not success:
-                    self.logger.error(f"Dropped message for session {event.session_id}")
+            if not channel:
+                # 找不到对应平台的 channel：不 ack，保留持久化文件，重启后由 _recover 重新投递
+                self.logger.error(
+                    f"No channel for platform {source.platform_name}, event "
+                    f"[session={event.session_id} ts={event.timestamp}] left unacked"
+                )
+                return
+
+            success = await self._deliver_with_retry(chunks, source, channel)
+            if not success:
+                # 投递失败：不 ack（Phase 0 临时方案，Phase 1 将替换为 DLQ），
+                # 持久化文件保留，事件总线重启时 _recover 会重新投递
+                self.logger.error(
+                    f"Delivery failed after {MAX_RETRIES} attempts, event "
+                    f"[session={event.session_id} ts={event.timestamp} "
+                    f"content={event.content[:50]!r}] left unacked for redelivery"
+                )
+                return
 
             self.context.eventbus.ack(event)
             self.logger.info(

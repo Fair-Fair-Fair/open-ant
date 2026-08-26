@@ -14,9 +14,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable
 
 if TYPE_CHECKING:
+    from litellm.types.completion import ChatCompletionMessageParam as Message
+
     from ant.core.agent import AgentSession
     from ant.core.tracer import Trace
-    from litellm.types.completion import ChatCompletionMessageParam as Message
 
 
 @dataclass
@@ -31,8 +32,8 @@ class PipelineContext:
     tool_calls: list[Any] = field(default_factory=list)
     stop_reason: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
-    iteration: int = 0  # 在 StreamToolExecutionStage 阶段，每当成功执行完一组tool_calls后，会执行 ctx.iteration += 1。
-    max_iterations: int = 10  # Agent 最多可以连续进行 10 轮“AI思考→调用一组工具→执行完毕→AI继续思考”的循环。
+    iteration: int = 0  # 在 StreamToolExecutionStage 阶段，每当成功执行完一组tool_calls后，会执行 ctx.iteration += 1。  # noqa: E501
+    max_iterations: int = 10  # Agent 最多可以连续进行 10 轮“AI思考→调用一组工具→执行完毕→AI继续思考”的循环。  # noqa: E501
     start_time: float = field(default_factory=time.time)
     trace: "Trace | None" = None
 

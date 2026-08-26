@@ -5,17 +5,17 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from ant.core.events import (
-    AgentEventSource,
-    DispatchEvent,
-    DispatchResultEvent
-)
+from ant.core.events import AgentEventSource, DispatchEvent, DispatchResultEvent
 from ant.tools.base import BaseTool, tool
 from ant.utils.def_loader import DefNotFoundError
 
 if TYPE_CHECKING:
     from ant.core.agent import AgentSession
     from ant.core.context import SharedContext
+
+# 子代理 dispatch 结果等待超时（秒）。
+# 子代理启动异常 / worker 繁忙 / 事件丢失时，避免主 agent 永久挂死。
+SUBAGENT_DISPATCH_TIMEOUT_SECONDS = 180.0
 
 
 def create_subagent_dispatch_tool(
@@ -108,8 +108,16 @@ def create_subagent_dispatch_tool(
                 parent_session_id=session.session_id
             )
             await shared_context.eventbus.publish(event)
-            # wait for result
-            response = await result_future
+            # wait for result, with timeout so a stuck subagent
+            # cannot hang the main agent's turn forever
+            response = await asyncio.wait_for(
+                result_future, timeout=SUBAGENT_DISPATCH_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            return (
+                "Subagent dispatch timed out after "
+                f"{SUBAGENT_DISPATCH_TIMEOUT_SECONDS}s"
+            )
         finally:
             # ALways unsubscribe
             shared_context.eventbus.unsubscribe(handle_result)

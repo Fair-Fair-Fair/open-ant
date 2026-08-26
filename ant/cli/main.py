@@ -3,13 +3,14 @@
 from pathlib import Path
 from typing import Annotated
 
-import typer        # 引入写命令菜单的工具
-from rich.console import Console        # 引入让字变好看的工具
+import typer  # 引入写命令菜单的工具
+from rich.console import Console  # 引入让字变好看的工具
 
 from ant.cli.chat import chat_command
-from ant.cli.server import server_command
+from ant.cli.doctor import doctor_command
 from ant.cli.ingest import ingest_command
 from ant.cli.init import init_command
+from ant.cli.server import server_command
 from ant.utils.config import Config
 
 app = typer.Typer(
@@ -168,6 +169,21 @@ def ingest(
     """Ingest documents into the vector knowledge base for RAG."""
     load_config(ctx)
     ingest_command(ctx, path)
+
+
+@app.command("doctor")
+def doctor(
+    ctx: typer.Context,
+    workspace: Annotated[str | None, workspace_option("Path to workspace directory")] = None,
+) -> None:
+    """Run startup self-checks (config, routing, docker, disk, history).
+
+    Unlike the other commands this one intentionally does NOT abort on a
+    broken config — a missing/invalid config is reported as a failed check
+    so the full picture is printed (exit code is non-zero when any check
+    failed).
+    """
+    doctor_command(ctx)
 
 
 if __name__ == "__main__":

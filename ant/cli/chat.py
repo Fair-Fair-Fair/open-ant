@@ -7,19 +7,13 @@ from rich.console import Console
 from rich.prompt import Confirm, Prompt
 from rich.text import Text
 
-from ant.ui.logo import print_logo
 from ant.core.agent import Agent
+from ant.core.context import SharedContext
+from ant.core.events import CliEventSource, ConfirmationRequestEvent, InboundEvent, OutboundEvent
+from ant.server import AgentWorker, Worker
+from ant.ui.logo import print_logo
 from ant.utils.config import Config, ConfigReloader
 from ant.utils.def_loader import DefNotFoundError
-
-from ant.core.context import SharedContext
-from ant.core.events import (
-    OutboundEvent, InboundEvent, CliEventSource, ConfirmationRequestEvent
-)
-from ant.server import (
-    AgentWorker, Worker
-)
-
 from ant.utils.logging import setup_logging
 
 

@@ -1,7 +1,6 @@
 """CLI command for ingesting documents into the RAG knowledge base."""
 
 import asyncio
-import logging
 from pathlib import Path
 
 import typer
@@ -25,7 +24,7 @@ def ingest_command(
     setup_logging(config, console_output=False)
 
     if not config.memory.enabled:
-        console.print("[red]Error: Memory system is not enabled. Set memory.enabled: true in config.[/red]")
+        console.print("[red]Error: Memory system is not enabled. Set memory.enabled: true in config.[/red]")  # noqa: E501
         raise typer.Exit(1)
 
     target = Path(path)

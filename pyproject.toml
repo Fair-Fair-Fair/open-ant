@@ -1,0 +1,79 @@
+[project]
+name = "open-ant-harness"
+version = "0.1.5"
+description = "Open-Ant: harness-engineering personal AI agent runtime"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+
+dependencies = [
+    "litellm>=1.0.0",
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "langchain-community>=0.3.0",
+    "langchain-text-splitters>=0.3.0",
+    "beautifulsoup4>=4.12.0",
+    "httpx>=0.27.0",
+    "chromadb>=0.5.0",
+    "watchdog>=3.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+]
+
+# Optional integrations — install what you need:
+#   pip install 'open-ant[telegram]'   pip install 'open-ant[all]'
+[project.optional-dependencies]
+telegram = ["python-telegram-bot>=20.0"]
+discord = ["discord.py>=2.0"]
+embeddings = ["sentence-transformers>=2.2"]   # local BAAI/bge-* embedding models
+webread = ["crawl4ai>=0.4"]
+all = [
+    "python-telegram-bot>=20.0",
+    "discord.py>=2.0",
+    "sentence-transformers>=2.2",
+    "crawl4ai>=0.4",
+]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4", "mypy>=1.10"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ant"]
+
+# SDIST SAFETY: allowlist ONLY — never bundle workspace/, .env, or any
+# runtime data. (Without this, a non-git checkout ships EVERYTHING,
+# which leaked real API keys in the 0.1.0 release.)
+[tool.hatch.build.targets.sdist]
+include = [
+    "/ant",
+    "/pyproject.toml",
+    "/LICENSE",
+    "/README.md",
+    "/open-ant.bat",
+    "/open-ant",
+]
+
+# The `open-ant` console command: init / chat / server / ingest
+[project.scripts]
+open-ant = "ant.cli.main:app"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["ant/tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = false

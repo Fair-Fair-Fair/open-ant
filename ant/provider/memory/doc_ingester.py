@@ -5,21 +5,20 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, List
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document
-
 # 引入各种文档加载器
 from langchain_community.document_loaders import (
-    PyPDFLoader,
-    Docx2txtLoader,
-    TextLoader,
     CSVLoader,
+    Docx2txtLoader,
     JSONLoader,
-    UnstructuredMarkdownLoader,
-    UnstructuredHTMLLoader,
-    UnstructuredPowerPointLoader,
+    PyPDFLoader,
+    TextLoader,
     UnstructuredExcelLoader,
+    UnstructuredHTMLLoader,
+    UnstructuredMarkdownLoader,
+    UnstructuredPowerPointLoader,
 )
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 if TYPE_CHECKING:
     from ant.provider.memory.base import VectorStore
@@ -43,7 +42,9 @@ class DocumentIngester:
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
-            separators=["\n\n", "\n", "。", ". ", "！", "! ", "？", "? ", "；", "; ", "，", ", ", " "],
+            separators=[
+                "\n\n", "\n", "。", ". ", "！", "! ", "？", "? ", "；", "; ", "，", ", ", " ",
+            ],
             length_function=len,
         )
         logger.info(
@@ -73,7 +74,7 @@ class DocumentIngester:
             try:
                 loader = TextLoader(str(path), encoding="utf-8")
             except Exception:
-                raise ValueError(f"Unsupported file type: {ext} (supported: {SUPPORTED_EXTENSIONS})")
+                raise ValueError(f"Unsupported file type: {ext} (supported: {SUPPORTED_EXTENSIONS})")  # noqa: E501
         else:
             loader = loader_cls(str(path))
         try:
@@ -172,21 +173,32 @@ class DocumentIngester:
         logger.info("Directory ingest complete: %d total chunks from %s", total, dir_path)
         return total
 
-    async def delete_by_source(self, source: str) -> None:
-        """Delete all chunks belonging to a specific source file."""
-        # 注意：本方法需要根据 source 精确删除，当前实现通过 query 获取所有文档再过滤，效率较低。
-        # 更好的做法是直接使用 ChromaDB 的 where 过滤，但当前接口未支持，可后续优化。
-        # 此处保留原实现，但可能因数据量大而不佳。
-        results = await self.vector_store.query(query_text="", top_k=1)
-        all_docs = await self.vector_store.get(ids=[d.id for d in results]) if results else []
+    async def delete_by_source(self, source: str) -> int:
+        """Delete all chunks belonging to a specific source file.
 
-        ids_to_delete = [
-            doc.id for doc in all_docs
-            if doc.metadata.get("source") == source
-        ]
-        if ids_to_delete:
-            await self.vector_store.delete(ids_to_delete)
-            logger.info("Deleted %d chunks for source: %s", len(ids_to_delete), source)
+        Returns the number of chunks deleted (0 if no match).
+        """
+        # 直接用 Chroma collection 的 where 过滤按 source 取回全部 chunk id，
+        # 修复旧实现 query(top_k=1) 只删第一块、其余 chunk 永远残留的问题。
+        collection = getattr(self.vector_store, "_collection", None)
+        if collection is None:
+            logger.warning(
+                "Vector store does not expose a Chroma collection; "
+                "skip source delete for %s",
+                source,
+            )
+            return 0
+
+        result = collection.get(where={"source": source})
+        ids_to_delete = list(result.get("ids") or []) if result else []
+
+        if not ids_to_delete:
+            logger.info("No chunks found for source: %s", source)
+            return 0
+
+        await self.vector_store.delete(ids_to_delete)
+        logger.info("Deleted %d chunks for source: %s", len(ids_to_delete), source)
+        return len(ids_to_delete)
 
     @staticmethod
     def _make_deterministic_id(source: str, chunk_index: int, content: str) -> str:

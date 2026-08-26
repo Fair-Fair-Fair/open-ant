@@ -2,8 +2,8 @@
 
 from typing import TYPE_CHECKING
 
-from ant.tools.base import BaseTool, tool
 from ant.provider.web_search import WebSearchProvider
+from ant.tools.base import BaseTool, tool
 
 if TYPE_CHECKING:
     from ant.core.agent import AgentSession

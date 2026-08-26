@@ -1,7 +1,7 @@
 """Base classes for memory providers."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import field
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -31,8 +31,13 @@ class EmbeddingProvider(ABC):
         """Create an embedding provider from config."""
         model = config.memory.embedding_model
         # 如果模型名称包含常见本地模型标识，或配置了 provider 字段
-        if (model and any(model.startswith(prefix) for prefix in ["BAAI/", "sentence-transformers/", "intfloat/"])) \
-                or getattr(config.memory, "embedding_provider", "") == "sentence_transformers":
+        if (
+            model
+            and any(
+                model.startswith(prefix)
+                for prefix in ["BAAI/", "sentence-transformers/", "intfloat/"]
+            )
+        ) or getattr(config.memory, "embedding_provider", "") == "sentence_transformers":
             from .sentence_transformer import SentenceTransformerEmbeddingProvider
             return SentenceTransformerEmbeddingProvider.from_config(config)
         else:

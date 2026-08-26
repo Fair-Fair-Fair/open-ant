@@ -11,7 +11,7 @@ from ant.utils.def_loader import (
     DefNotFoundError,
     InvalidDefError,
     discover_definitions,
-    parse_definition
+    parse_definition,
 )
 
 if TYPE_CHECKING:
@@ -46,7 +46,7 @@ class CronDef(BaseModel):
 
         if gap_minutes < 1:
             raise ValueError(
-                f"Schedule must have minimum 1-minute granularity. Got: {v} (runs every {gap_minutes:.0f} min)"
+                f"Schedule must have minimum 1-minute granularity. Got: {v} (runs every {gap_minutes:.0f} min)"  # noqa: E501
             )
 
         return v
