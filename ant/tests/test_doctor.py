@@ -27,6 +27,9 @@ def _write_good_config(workspace: Path) -> None:
 
     sandbox.command.backend 固定为 host，让 doctor 跳过 docker 检查
     （docker 是否可用取决于本机，不该影响配置相关的测试判定）。
+    storage/bus 固定为 jsonl/memory：CI runner 上没有 .env 凭据，
+    默认的 mysql/rabbitmq 后端会让 doctor 探活失败（退出码 1），
+    而配置类测试必须与基础设施无关（确定性）。
     """
     (workspace / "config.user.yaml").write_text(
         yaml.safe_dump(
@@ -38,6 +41,8 @@ def _write_good_config(workspace: Path) -> None:
                 },
                 "default_agent": "pickle",
                 "sandbox": {"command": {"backend": "host"}},
+                "storage": {"backend": "jsonl"},
+                "bus": {"backend": "memory"},
             }
         ),
         encoding="utf-8",
