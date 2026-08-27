@@ -1,8 +1,8 @@
 # 🐜 Open-Ant
 
-**生产级 LLM 多智能体运行时** —— 事件驱动内核 + 图增强记忆 + 深度安全治理，全部组件在真实基础设施（MySQL / RabbitMQ / Redis / Qdrant / Neo4j）上集成验证，**378 个自动化测试 + CI 门禁**。
+**生产级 LLM 多智能体运行时** —— 事件驱动内核 + 图增强记忆 + 深度安全治理，全部组件在真实基础设施（MySQL / RabbitMQ / Redis / Qdrant / Neo4j）上集成验证，**422 个自动化测试 + CI 门禁**。
 
-> 可通过 PyPI 体验：`pip install open-ant-harness`（线上为早期版本；生产级能力见本仓库，Phase 5 收尾后发布新版）
+> PyPI 已发布生产级版本：`pip install open-ant-harness`（v0.2.0）
 
 ---
 
@@ -48,9 +48,9 @@
 ## 快速开始
 
 ```bash
-# 1. 安装（PyPI 或源码最新版）
+# 1. 安装（PyPI 生产级版本 v0.2.0）
 pip install open-ant-harness
-# 源码安装（含全部生产级能力）：
+# 源码安装（开发/最新能力）：
 git clone https://github.com/Fair-Fair-Fair/open-ant.git && cd open-ant
 pip install -e src
 
@@ -91,17 +91,19 @@ open-ant migrate-chroma --workspace ./workspace    # Chroma → Qdrant 迁移
 - **Neo4j 记忆图**：实体/关系建模、**冲突检测与 LLM 仲裁**（SUPERSEDES 边）、低重要度记忆软归档 TTL
 - **检索管线**：query 改写 → hybrid → 子图扩展 → cross-encoder 重排 → `<retrieved>` 定界符防注入
 - **提取层**：工具调用约束 JSON（单条坏数据不连坐整批）
-- **自带评测**：`python -m evals.run_retrieval_eval` —— 20 篇中文语料 × 30 条标注查询，dense **0.983** / hybrid 0.917 / +rerank **0.967**（recall@5，报告可复现）
+- **自带评测**：`python -m evals.run_retrieval_eval` —— 20 篇中文语料 × 30 条标注查询，dense **0.983** / hybrid(RRF) **0.983**（bge-small-zh 下追平）/ +rerank **0.967**（recall@5，报告可复现）；中文稀疏模型对照实验见 `evals/report_sparse_zh.md`
 
 ### 安全
 - 三层沙箱：路径（阻断配置/密钥）· Docker 命令（`--user` 非 root、内存/CPU 硬限、只读根文件系统）· 网络（SSRF 防御、域名黑白名单+私有 IP 阻断）
 - 输入护栏（NFKC 规范化/混合脚本检测/regex 注入 + **LLM-judge 语义复核**）+ 输出护栏（**流式脱敏**：滑动缓冲先审后出）+ 工具结果注入扫描
 - WS/API token 认证（常量时间比较、4401 拒绝）、确认审批 fail-closed 绑定、Redis 滑窗限流（挂则放行）
-- 凭据纪律：密钥仅存 `.env`，日志/测试/文档零泄露（发布有泄露扫描门禁）
+- **护栏有评测**：20 恶意 + 20 良性样本集，真实数字**检出率 85%、误杀率 0%**（`python -m evals.run_guardrail_eval --ci`，CI 门禁 ≥60% 且 ≤20%）
+- 凭据纪律：密钥仅存 `.env`，日志/测试/文档零泄露（发布有 check_publish 泄露扫描门禁）
 
 ### 工程
-- **378 个自动化测试**（pytest）+ ruff + GitHub Actions CI；含真实 MySQL / RabbitMQ / Qdrant 云 / Neo4j Aura 集成测试（无凭据环境自动 skip）
-- 演进可回溯：26.1 玩具 → 27.0 止血+测试 → 28.0 存储/消息 → 29.0 LLM/工具 → 30.0 记忆 → 31.0 安全/可观测（`git log` 每步可复现）
+- **422 个自动化测试**（pytest）+ ruff + GitHub Actions CI；含真实 MySQL / RabbitMQ / Qdrant 云 / Neo4j Aura 集成测试（无凭据环境自动 skip）
+- **发布门禁**（`check_publish.py`）：密钥形态扫描 + 文件名黑名单，0.1.0 密钥泄露事故后强制流程，发布前非零禁止上传
+- 演进可回溯：26.1 玩具 → 27.0 止血+测试 → 28.0 存储/消息 → 29.0 LLM/工具 → 30.0 记忆 → 31.0 安全/可观测 → 32.0 收尾（`git log` 每步可复现）
 
 ## 目录结构
 
@@ -125,13 +127,17 @@ src/                      # git 仓库根
 
 ```bash
 cd src
-python -m pytest -q                 # 378 passed
-ruff check ant                      # 0 错误
-python -m evals.run_retrieval_eval  # 检索三方法对照 + 报告写入 evals/report_retrieval.md
+python -m pytest -q                        # 422 passed
+ruff check ant                             # 0 错误
+python -m evals.run_retrieval_eval         # 检索三方法对照 → evals/report_retrieval.md
+python -m evals.run_guardrail_eval --ci    # 注入护栏检出率/误杀率（CI 同款门禁）
+python -m evals.agent_task_runner          # 10 个记忆任务离线骨架评分
+python -m evals.sparse_zh_experiment       # 中文稀疏模型真云对照实验
+python check_publish.py                    # 发布前密钥扫描门禁（非零禁止上传）
 ```
 
 ## 当前边界（诚实声明）
 
-- 单机单进程模型：EventBus 已基于 RabbitMQ 可横向扩展，worker 多副本部署为 Phase 5 待办
+- 单机单进程模型：EventBus 已基于 RabbitMQ 可横向扩展，worker 多副本部署为后续方向
 - 多用户隔离为单用户模型（认证保护端点，session 级多用户绑定留待扩展）
-- PyPI 线上版本为早期版，生产级代码将在 Phase 5 收尾后发布
+- docker-compose 全栈已提供（含 healthcheck 门控启动），待实机环境做最终验证
