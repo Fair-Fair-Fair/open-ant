@@ -140,7 +140,14 @@ class MemoryRetriever:
         Best-effort enhancement: any failure (LLM down, empty output) falls
         back to the original query.
         """
-        if not getattr(self.context.config.memory, "query_rewrite_enabled", False):
+        memory_cfg = self.context.config.memory
+        # Phase 5A: query_rewrite_enabled 已转正为 MemoryConfig 真实字段
+        # （YAML: memory.query_rewrite_enabled）。hasattr 防御旧 fake
+        # config（测试 / 兼容）仍无该字段。
+        if not (
+            hasattr(memory_cfg, "query_rewrite_enabled")
+            and memory_cfg.query_rewrite_enabled
+        ):
             return query
         if not query.strip():
             return query

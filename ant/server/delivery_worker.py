@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from ant.core.events import EventSource, OutboundEvent
 from ant.core.history import HistorySession
 
+from .observability import record_event_consumed  # Phase 5A observability
 from .worker import SubscribeWorker
 
 if TYPE_CHECKING:
@@ -134,6 +135,11 @@ class DeliveryWorker(SubscribeWorker):
 
     async def handle_event(self, event: OutboundEvent) -> None:
         """Handle an outbound message event"""
+        # Phase 5A observability：事件消费计数（观测永不打断主链路，原则 11）。
+        try:
+            record_event_consumed(event)
+        except Exception:
+            pass
         try:
             session_info = await self._get_session_source(event.session_id)
 

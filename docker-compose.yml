@@ -1,0 +1,145 @@
+# Open-Ant 本地全栈编排（Phase 5，见 workspace/plan.md §5.2）
+#
+# 用法（在 open-ant 根目录执行，-f/--env-file 均相对当前目录）：
+#   docker compose -f src/docker-compose.yml --env-file .env config   # 语法校验
+#   docker compose -f src/docker-compose.yml --env-file .env up -d
+#   （compose 内相对路径以本文件所在目录 src/ 为基准；--env-file 为 ${VAR}
+#     插值提供 .env。刻意不把 .env 复制进 src/——src/ 是 git 仓库根，仓库内
+#     不放密钥（0.1.0 泄露事故的教训），见 docs/deploy.md）
+#
+# 凭据纪律：本文件只出现变量名，不出现任何密钥值；值一律来自 ../.env（app 的
+# env_file）或 .env（${VAR} 插值）。pydantic-settings 环境变量优先于 .env 文件，
+# 与 InfraSettings（src/ant/utils/settings.py）的优先级设计一致。
+
+services:
+  # ── MySQL 8：会话/消息/outbox/usage 持久化（storage.backend=mysql 默认值）──
+  # 凭据来源：.env 里是 MYSQL_USERNAME/MYSQL_PASSWORD 分量，官方镜像要的是
+  #   MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE（+ MYSQL_ROOT_PASSWORD 三选一），
+  #   下面做显式映射。MYSQL_USERNAME=root 时镜像创建 root@'%' 账户——compose 网络
+  #   内 app 以 root 登录即命中该账户。
+  # 健康检查：mysqladmin ping（镜像自带），$$ 转义为容器内展开的 $MYSQL_ROOT_PASSWORD。
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_USER: ${MYSQL_USERNAME}            # 映射自 .env 的 MYSQL_USERNAME
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}        # 映射自 .env 的 MYSQL_PASSWORD
+      MYSQL_DATABASE: open_ant                 # 与 InfraSettings 默认 mysql_database 对齐
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}   # 官方镜像要求 root 密码/空/随机 三选一
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    # 不发布 3306：app 走 compose 内部网络即可，同时避免与宿主机 MySQL
+    #（本地 dev 默认启动）端口冲突。
+
+  # ── RabbitMQ 3：持久事件总线（bus.backend=rabbitmq 默认值）──
+  #   durable queue / DLX / DLQ / outbox 投递。
+  # 凭据来源：默认 guest/guest（.env 的 RABBITMQ_USERNAME/RABBITMQ_PASSWORD 即 guest）。
+  #   官方镜像默认 loopback_users.guest=true（guest 只允许容器本机连接），app 跨
+  #   容器网络连接会被拒，故用镜像官方支持的 env 放开（仅本地开发；生产应改用
+  #   conf.d 配置 + 非 guest 凭据）。
+  # 健康检查：rabbitmq-diagnostics ping（容器内本机通道，无需登录）。
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit loopback_users '[]'"
+    ports:
+      - "15672:15672"   # 管理台（guest/guest 登录；若宿主机也有 RabbitMQ 管理台会冲突，可注释掉）
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Redis 7：embedding 缓存 / 限流 / 配置锁（缓存性质，可丢失，未挂卷）──
+  # 凭据来源：无密码本机模式（本地开发）；生产应 requirepass + .env 配 REDIS_URL。
+  # 注意：.env 没有 REDIS_URL 变量（InfraSettings 默认 redis://127.0.0.1:6379/0），
+  #   容器内 127.0.0.1 指向 app 自己，必须在 app 服务里覆盖为 redis 服务名。
+  # 健康检查：redis-cli ping。
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ── app：open-ant 24/7 服务端 ──
+  #   Channel（Telegram/Discord/WebSocket/CLI）+ Agent + Delivery + Cron worker
+  #   + FastAPI（/healthz /readyz /metrics，Phase 4B）。
+  # 凭据来源：env_file ../.env 整体注入（LLM/embedding/websearch/NEO4J_*/QDRANT_*/
+  #   MYSQL_*/RABBITMQ_* 全部进容器环境变量）；下面再用 environment 覆盖基础设施
+  #   host 指向 compose 服务名（.env 里是 127.0.0.1，容器内必须改）。
+  # 工作区：../workspace 挂到 /workspace（与 Dockerfile CMD 对齐；workspace/ 永不进镜像）。
+  # 启动条件：depends_on ... condition: service_healthy，三件套健康后才起 app。
+  app:
+    build: .
+    image: open-ant-app:latest
+    env_file:
+      - ../.env
+    environment:
+      MYSQL_HOST: mysql             # 覆盖 .env 默认 127.0.0.1 → compose 网络内服务名
+      MYSQL_PORT: "3306"
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "127.0.0.1:8000:8000"   # 默认只发布到宿主机回环（安全默认）；局域网访问改 8000:8000 并先配好 api token
+    volumes:
+      - ../workspace:/workspace
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── 备选 1：本地 Qdrant（默认走 .env 的 Qdrant 云服务）──────────────────────
+  # 启用方式：取消本段注释 + volumes 里的 qdrant-data，并把 .env 的
+  #   QDRANT_URL 改为 http://qdrant:6333、QDRANT_API_KEY 留空（本地无需 key）。
+  # qdrant:
+  #   image: qdrant/qdrant:latest
+  #   ports:
+  #     - "6333:6333"            # REST API（dashboard 在 6333/dashboard）
+  #   volumes:
+  #     - qdrant-data:/qdrant/storage
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+  #     interval: 15s
+  #     timeout: 5s
+  #     retries: 5
+
+  # ── 备选 2：本地 Neo4j（默认走 .env 的 Neo4j Aura 云）───────────────────────
+  # 启用方式：取消本段注释 + volumes 里的 neo4j-data，并把 .env 的
+  #   NEO4J_URI 改为 bolt://neo4j:7687、NEO4J_USERNAME/NEO4J_PASSWORD 与下面
+  #   NEO4J_AUTH 一致（值只写在 .env，这里只放占位）。
+  # neo4j:
+  #   image: neo4j:5
+  #   environment:
+  #     NEO4J_AUTH: neo4j/CHANGE_ME  # 变量名占位：真实密码只放 .env 的 NEO4J_PASSWORD
+  #   ports:
+  #     - "7474:7474"            # Browser
+  #     - "7687:7687"            # Bolt
+  #   volumes:
+  #     - neo4j-data:/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:7474 || exit 1"]
+  #     interval: 15s
+  #     timeout: 5s
+  #     retries: 5
+
+volumes:
+  mysql-data:
+  # 本地容器备选启用时再取消注释：
+  # qdrant-data:
+  # neo4j-data:

@@ -25,6 +25,7 @@ from ant.core.events import (
 from ant.utils.def_loader import DefNotFoundError  # Agent/Skill 定义加载失败的异常
 
 from .dedup import is_processed, mark_processed  # Phase 1: 幂等消费
+from .observability import record_event_consumed  # Phase 5A observability
 from .worker import SubscribeWorker  # 基类：提供事件订阅型 Worker 的基础能力
 
 if TYPE_CHECKING:
@@ -89,6 +90,13 @@ class AgentWorker(SubscribeWorker):
         Args:
             event: 入站事件，包含 session_id、content（用户消息）、retry_count 等字段
         """
+        # Phase 5A observability：事件消费计数（观测永不打断主链路，原则 11；
+        # helper 不抛，接线处仍防御）。
+        try:
+            record_event_consumed(event)
+        except Exception:
+            pass
+
         # Phase 1 幂等消费（仅 rabbitmq 模式）：broker 是 at-least-once 投递，
         # 崩溃/nack 重投会带上同一个 message_id。已处理过的直接返回——
         # 订阅包装在 handler 正常返回后自动 ack，重复消息就此消化。

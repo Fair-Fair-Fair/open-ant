@@ -80,6 +80,16 @@ class ToolRegistry:
             # 而不是 re-raise 炸掉整轮；完整 traceback 记入日志，不静默吞。
             logger.exception("Tool execution error: %s", name)
             return f"Tool execution error: {e}"
+        finally:
+            # ── Phase 5A observability ──
+            # 成功与异常路径统一记录调用与耗时。Lazy import 避免
+            # tools↔server 循环导入；观测永不打断主链路（原则 11）。
+            try:
+                from ant.server.observability import observe_tool
+
+                observe_tool(name, time.time() - start)
+            except Exception:
+                pass
 
     @classmethod
     def with_builtins(cls, governance: ToolGovernance | None = None) -> "ToolRegistry":

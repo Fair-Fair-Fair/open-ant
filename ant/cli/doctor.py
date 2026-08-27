@@ -29,6 +29,8 @@ from sqlalchemy import text
 from ant.bus.rabbitmq import RabbitMqBus
 from ant.core.agent_loader import AgentLoader
 from ant.core.routing import Binding
+from ant.memory.graph import MemoryGraph
+from ant.provider.memory.qdrant_store import QdrantStore
 from ant.storage.db import create_engine
 from ant.utils.config import Config
 from ant.utils.settings import InfraSettings
@@ -230,6 +232,70 @@ async def check_rabbitmq(settings: InfraSettings | None = None) -> tuple[bool, s
     return True, f"connected to rabbitmq@{settings.rabbitmq_host}:{settings.rabbitmq_port}"
 
 
+async def check_qdrant(settings: InfraSettings | None = None) -> tuple[bool, str]:
+    """Qdrant 连通性检查（仅 memory.enabled 且 vector_backend=qdrant 时调用）。
+
+    与 /readyz 同语义：凭据缺失 → ERROR（not_configured）；真实探测 =
+    强制懒加载客户端（含集合检查）+ 一次空 get。URL 一律打码。
+    *settings* 可注入假对象供单测。
+    """
+    settings = settings or InfraSettings()
+    url = settings.qdrant_url()
+    if url is None or settings.qdrant_api_key() is None:
+        return False, "未配置 Qdrant 凭据（.env），向量检索不可用"
+
+    store = QdrantStore(config=None, embedding_provider=None, settings=settings)
+    try:
+        try:
+            bootstrap = store._client_async  # noqa: SLF001 — doctor 内部探针
+            await asyncio.wait_for(bootstrap(), PROBE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(store.get([]), PROBE_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return (
+                False,
+                f"Qdrant timeout: no response within {PROBE_TIMEOUT_SECONDS}s "
+                f"({settings.masked_qdrant_url()})",
+            )
+        except Exception as exc:
+            return False, f"Qdrant {type(exc).__name__}: {exc}"
+    finally:
+        pass  # QdrantStore 无显式 close（httpx 客户端随 store 析构）
+    return True, f"connected to qdrant ({settings.masked_qdrant_url()})"
+
+
+async def check_neo4j(settings: InfraSettings | None = None) -> tuple[bool, str]:
+    """Neo4j 连通性检查（仅 memory.enabled 且 graph_enabled 时调用）。
+
+    与 /readyz 同语义：凭据缺失 → ERROR；真实探测 = 驱动
+    verify_connectivity。URI 一律打码。
+    """
+    settings = settings or InfraSettings()
+    uri = settings.neo4j_uri()
+    username = settings.neo4j_username()
+    password = settings.neo4j_password()
+    if uri is None or username is None or password is None:
+        return False, "未配置 Neo4j 凭据（.env），记忆图不可用"
+
+    graph = MemoryGraph(uri, username, password, database=settings.neo4j_database())
+    try:
+        try:
+            await asyncio.wait_for(
+                graph._driver.verify_connectivity(),  # noqa: SLF001 — doctor 内部探针
+                PROBE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return (
+                False,
+                f"Neo4j timeout: no response within {PROBE_TIMEOUT_SECONDS}s "
+                f"({settings.masked_neo4j_uri()})",
+            )
+        except Exception as exc:
+            return False, f"Neo4j {type(exc).__name__}: {exc}"
+    finally:
+        await graph.close()
+    return True, f"connected to neo4j ({settings.masked_neo4j_uri()})"
+
+
 def doctor_command(ctx: typer.Context) -> None:
     """运行启动自检并输出汇总表；存在 error 时退出码非 0。"""
     workspace: Path = ctx.obj["workspace"]
@@ -288,6 +354,21 @@ def doctor_command(ctx: typer.Context) -> None:
                 ("rabbitmq", None,
                  f"skipped (bus.backend={config.bus.backend!r})")
             )
+
+        # (i) Qdrant 连通性（仅 memory.enabled 且 vector_backend=qdrant 时）
+        if (
+            config.memory.enabled
+            and getattr(config.memory, "vector_backend", "qdrant") == "qdrant"
+        ):
+            results.append(("qdrant", *asyncio.run(check_qdrant())))
+        else:
+            results.append(("qdrant", None, "skipped (memory disabled or chroma backend)"))
+
+        # (j) Neo4j 连通性（仅 memory.enabled 且 graph_enabled 时）
+        if config.memory.enabled and getattr(config.memory, "graph_enabled", True):
+            results.append(("neo4j", *asyncio.run(check_neo4j())))
+        else:
+            results.append(("neo4j", None, "skipped (memory disabled or graph disabled)"))
     else:
         for name, reason in (
             ("routing bindings", "skipped (config failed)"),
@@ -296,6 +377,8 @@ def doctor_command(ctx: typer.Context) -> None:
             ("history dir", "skipped (config failed)"),
             ("mysql", "skipped (config failed)"),
             ("rabbitmq", "skipped (config failed)"),
+            ("qdrant", "skipped (config failed)"),
+            ("neo4j", "skipped (config failed)"),
         ):
             results.append((name, None, reason))
 

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from ant.core.events import EventSource, InboundEvent
 
 # from ant.core.agent import Agent
+from .observability import record_event_consumed  # Phase 5A observability
 from .worker import Worker
 
 # from ant.utils.config import SourceSessionConfig
@@ -72,6 +73,12 @@ class ChannelWorker(Worker):
                     content=message,
                     timestamp=time.time(),
                 )
+
+                # Phase 5A observability：收到入站即计数（观测永不打断主链路）。
+                try:
+                    record_event_consumed(event)
+                except Exception:
+                    pass
 
                 await self.context.eventbus.publish(event)
                 self.logger.debug(f"Published INBOUND event from {source}")

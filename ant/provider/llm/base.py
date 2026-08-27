@@ -8,6 +8,7 @@ optional async ``usage_callback`` on non-streaming calls.
 """
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional, cast
 
@@ -167,6 +168,7 @@ class LLMProvider:
         """
         request_kwargs = self._build_request_kwargs(messages, tools, **kwargs)
 
+        start = time.time()
         response = await self._router.acompletion(**request_kwargs)
 
         choice = cast(Choices, response.choices[0])
@@ -184,6 +186,23 @@ class LLMProvider:
         ]
 
         usage = self._extract_usage(response)
+
+        # ── Phase 5A observability ──
+        # 完成点（读 usage 处）记录 LLM 调用：耗时 + token。Lazy import
+        # 避免 provider↔server 循环导入；观测永不打断主链路（原则 11）。
+        elapsed = time.time() - start
+        try:
+            from ant.server.observability import observe_llm
+
+            observe_llm(
+                self.model,
+                elapsed,
+                int(usage.get("prompt_tokens", 0) or 0) if usage else 0,
+                int(usage.get("completion_tokens", 0) or 0) if usage else 0,
+            )
+        except Exception:
+            pass
+
         if usage is not None and self.usage_callback is not None:
             try:
                 await self.usage_callback(usage)
@@ -224,6 +243,7 @@ class LLMProvider:
         stream_cost: Optional[float] = None
 
         try:
+            start = time.time()
             response = await self._router.acompletion(**request_kwargs)
 
             async for chunk in response:
@@ -283,6 +303,27 @@ class LLMProvider:
                 ]
 
                 yield {"type": "tool_calls", "data": tool_calls}
+
+            # ── Phase 5A observability ──
+            # 流式完成点：usage 聚合后、done 之前记录。耗时 = 整段流式
+            # 耗时（含调用方消费 token 的时间）。观测永不打断主链路（原则 11）。
+            elapsed = time.time() - start
+            try:
+                from ant.server.observability import observe_llm
+
+                stream_prompt = (
+                    int(getattr(stream_usage, "prompt_tokens", 0) or 0)
+                    if stream_usage is not None
+                    else 0
+                )
+                stream_completion = (
+                    int(getattr(stream_usage, "completion_tokens", 0) or 0)
+                    if stream_usage is not None
+                    else 0
+                )
+                observe_llm(self.model, elapsed, stream_prompt, stream_completion)
+            except Exception:
+                pass
 
             # usage 事件（在 done 之前）
             usage_event = self._build_stream_usage(stream_usage, stream_cost)

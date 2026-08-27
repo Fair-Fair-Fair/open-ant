@@ -10,6 +10,7 @@ from croniter import croniter
 from ant.core.agent import Agent
 from ant.core.events import CronEventSource, DispatchEvent
 
+from .observability import record_event_consumed  # Phase 5A observability
 from .worker import Worker
 
 if TYPE_CHECKING:
@@ -73,6 +74,13 @@ class CronWorker(Worker):
                 source=CronEventSource(cron_id=cron_def.id),
                 content=cron_def.prompt
             )
+
+            # Phase 5A observability：cron 任务触发计数（观测永不打断主链路）。
+            try:
+                record_event_consumed(event)
+            except Exception:
+                pass
+
             await self.context.eventbus.publish(event)
             self.logger.info(f"Dispatched cron job: {cron_def.id}")
 

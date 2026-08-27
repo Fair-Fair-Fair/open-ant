@@ -1,6 +1,6 @@
 [project]
 name = "open-ant-harness"
-version = "0.1.5"
+version = "0.2.0"
 description = "Open-Ant: harness-engineering personal AI agent runtime"
 readme = "README.md"
 license = "MIT"
@@ -37,6 +37,8 @@ dependencies = [
     "neo4j>=5.20",
     # Phase 4B: observability (Prometheus metrics + probes)
     "prometheus-client>=0.20",
+    # Phase 5E: Chinese sparse vector generator (jieba word segmentation)
+    "jieba>=0.42",
 ]
 
 # Optional integrations — install what you need:

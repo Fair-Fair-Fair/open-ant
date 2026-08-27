@@ -21,6 +21,7 @@ Replaces ChromaDB as the RAG backend:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -35,6 +36,12 @@ logger = logging.getLogger(__name__)
 # Server-side fusion overfetches per branch so RRF has room to re-rank.
 _PREFETCH_MULTIPLIER = 4
 _PREFETCH_MIN = 10
+
+# Phase 5E: fixed hashed index space for jieba sparse terms.  Must be
+# accepted by the Qdrant sparse index config (fastembed's BM25 vocab is
+# ~250k and works with the default collection config; 1M is verified by
+# the experiment).
+_JIEBA_INDEX_SPACE = 1_000_000
 
 
 class QdrantStoreError(RuntimeError):
@@ -197,12 +204,86 @@ class QdrantStore(VectorStore):
         return await self.embedding_provider.embed(texts)
 
     async def _sparse_vectors(self, texts: list[str]) -> list[dict[str, Any]]:
-        """BM25 sparse vectors via fastembed, computed off the event loop."""
+        """Sparse vectors per ``config.memory.sparse_model`` (Phase 5E).
+
+        ``fastembed`` (default) — BM25 via the fastembed ONNX model,
+        computed off the event loop (unchanged behaviour).
+
+        ``jieba`` — Chinese word segmentation with a fixed 1M hashed
+        index space; the fastembed model is never loaded (saves the
+        ONNX model's memory).  Qdrant's server-side IDF modifier computes
+        the global IDF automatically, so clients only send term
+        frequency — same contract as the fastembed path.
+
+        Index-space warning: the two generators use DIFFERENT index
+        spaces (fastembed's BM25 vocabulary vs. hashed jieba terms), so
+        one collection must never mix them.  After switching
+        ``sparse_model``, rebuild the collection (``delete_by_filter``
+        or recreate) or hybrid recall silently degrades.
+        """
+        if self._sparse_model() == "jieba":
+            return await asyncio.to_thread(self._jieba_sparse_vectors, texts)
         if self._sparse_embedder is None:
             from fastembed import SparseTextEmbedding
 
             self._sparse_embedder = SparseTextEmbedding("Qdrant/bm25")
         return await asyncio.to_thread(self._sparse_embed_sync, texts)
+
+    def _sparse_model(self) -> str:
+        """Generator selected by ``config.memory.sparse_model``.
+
+        Missing/legacy config (no ``memory`` section) falls back to
+        ``fastembed`` so pre-Phase-5E callers keep today's behaviour.
+        """
+        return getattr(getattr(self.config, "memory", None), "sparse_model", "fastembed")
+
+    @staticmethod
+    def _jieba_term_index(term: str) -> int:
+        """Deterministic term → index inside the fixed 1M index space.
+
+        ``sha256(term.encode("utf-8")).digest()[:8]`` → big-endian int →
+        ``% 1_000_000``.  UTF-8 stable across processes and Python
+        versions (no ``hash()`` salt), so ingestion and query agree even
+        when they run in different processes/containers.
+        """
+        digest = hashlib.sha256(term.encode("utf-8")).digest()[:8]
+        return int.from_bytes(digest, "big") % _JIEBA_INDEX_SPACE
+
+    @staticmethod
+    def _jieba_sparse_vectors(texts: list[str]) -> list[dict[str, Any]]:
+        """Chinese sparse vectors via jieba word segmentation (Phase 5E).
+
+        ``jieba.lcut`` per text → per-term counts → ``{index: tf}``,
+        returned as ``{"indices": [...], "values": [...]}`` — the same
+        structure as the fastembed path.  Values are raw term
+        frequencies; Qdrant's server-side ``Modifier.IDF`` computes the
+        IDF weight automatically, so no client-side IDF is needed.
+
+        The index space is fixed (``_JIEBA_INDEX_SPACE``) and
+        cross-process-stable, but it is NOT the fastembed BM25
+        vocabulary space — mixing the two generators inside one
+        collection corrupts hybrid semantics; rebuild the collection
+        after switching ``config.memory.sparse_model``.
+        """
+        import jieba
+
+        out: list[dict[str, Any]] = []
+        for text in texts:
+            counts: dict[int, int] = {}
+            for term in jieba.lcut(text):
+                term = term.strip()
+                if not term:
+                    continue
+                index = QdrantStore._jieba_term_index(term)
+                counts[index] = counts.get(index, 0) + 1
+            indices = sorted(counts)
+            out.append(
+                {
+                    "indices": indices,
+                    "values": [float(counts[i]) for i in indices],
+                }
+            )
+        return out
 
     def _sparse_embed_sync(self, texts: list[str]) -> list[dict[str, Any]]:
         results = self._sparse_embedder.embed(texts)

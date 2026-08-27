@@ -23,3 +23,22 @@ jobs:
         run: ruff check ant
       - name: Pytest
         run: pytest -q
+
+  # Phase 5D: guardrail eval 进 CI。离线可跑（纯 pytest + 默认配置的
+  # InputGuard），不依赖任何外部基础设施（Qdrant/MySQL/LLM 都不需要）。
+  eval:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .   # 仓库根目录
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package with dev deps
+        run: pip install -e ".[dev]"
+      - name: Guardrail dataset + runner tests
+        run: pytest -q ant/tests/test_guardrail_eval.py ant/tests/test_eval_metrics.py
+      - name: Guardrail eval runner (CI mode, threshold asserts)
+        run: python -m evals.run_guardrail_eval --ci

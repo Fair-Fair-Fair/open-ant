@@ -114,6 +114,25 @@ class MemoryConfig(BaseModel):
     """Optional second-stage rerank. ``cross_encoder`` needs the model
     available locally (offline cache) and degrades gracefully otherwise."""
     reranker_model: str = "BAAI/bge-reranker-base"
+    # ── Phase 5E: sparse vector generator (hybrid retrieval) ──
+    sparse_model: Literal["fastembed", "jieba"] = "fastembed"
+    """Sparse vector generator for hybrid retrieval.
+
+    ``fastembed`` — BM25 via the fastembed ONNX model (default; the
+                   original Phase-3 behaviour; word-level, English-centric).
+    ``jieba``    — Chinese word segmentation with a stable hashed term
+                   index (better on Chinese corpora; does NOT load the
+                   fastembed model, saving its memory).
+
+    The two generators use different index spaces — never mix them in
+    one collection; rebuild (delete_by_filter or recreate) after
+    switching."""
+    query_rewrite_enabled: bool = False
+    """Phase 5A: LLM query rewrite before retrieval (opt-in, default off).
+
+    Read directly by ``MemoryRetriever._rewrite_query`` — the old getattr
+    fallback stays for compat with fake configs, but this is the real
+    YAML-configurable field (``memory.query_rewrite_enabled``)."""
 
 
 class TelegramConfig(BaseModel):
@@ -326,12 +345,27 @@ class InputGuardrailConfig(BaseModel):
     """When True, matching messages are blocked. When False, only logged (audit mode)."""
     blocked_patterns: list[str] | None = None
     """Custom regex patterns for injection detection. None = use built-in defaults."""
+    judge_enabled: bool = False
+    """Phase 4C/5A: opt-in LLM-judge layer for input injection review.
+
+    This is the real, YAML-configurable field (``guardrails.input.
+    judge_enabled``) behind the ``getattr(config.input, "judge_enabled",
+    False)`` read in ``guardrails.Guardrails`` — with the field present the
+    getattr resolves to it and YAML actually takes effect.  It is the switch
+    counterpart of the ``output.llm_judge`` knobs container
+    (:class:`LlmJudgeConfig`); the two were named differently across phases
+    and this docstring records that they describe the same feature."""
 
 
 class LlmJudgeConfig(BaseModel):
     """LLM-based content judgement (Phase 4C, consumed by the content-safety
     agent). Only ``enabled`` is settled here; the remaining knobs are read
-    via ``getattr`` by the consuming agent for forward compatibility."""
+    via ``getattr`` by the consuming agent for forward compatibility.
+
+    Phase 5A: this is the *knobs* container under ``guardrails.output.
+    llm_judge``; the on/off switch the guardrails facade reads lives on the
+    input side as ``guardrails.input.judge_enabled`` (see
+    :class:`InputGuardrailConfig`)."""
 
     enabled: bool = False
 

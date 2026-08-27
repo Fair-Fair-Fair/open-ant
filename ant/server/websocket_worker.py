@@ -21,6 +21,7 @@ from ant.core.events import (
 from ant.utils.config import SourceSessionConfig
 
 from .auth import verify_ws_token
+from .observability import record_event_consumed  # Phase 5A observability
 from .rate_limit import SlidingWindowLimiter
 from .worker import SubscribeWorker
 
@@ -229,6 +230,12 @@ class WebSocketWorker(SubscribeWorker):
                 # ─────────────────────────────────────
 
                 event = await self._normalize_message(msg)
+
+                # Phase 5A observability：客户端消息入站计数（观测永不打断主链路）。
+                try:
+                    record_event_consumed(event)
+                except Exception:
+                    pass
 
                 await self.context.eventbus.publish(event)
                 self.logger.debug(f"Emitted InboundEvent from WebSocket: {msg.source}")
