@@ -1,0 +1,21 @@
+32.0 Phase 5 收尾: 埋点接线/运维/部署/Eval 进 CI/中文稀疏实验
+
+- 埋点接线: record_event_consumed 落 5 个 worker 入口, observe_tool 落
+  registry finally, observe_llm 落 chat/stream_chat 完成点(全部防御式,
+  观测永不打断主链路)
+- config 收口: judge_enabled/query_rewrite_enabled/sparse_model 转正为
+  pydantic 字段, YAML 可配(hasattr 防御保持兼容)
+- doctor 补 Qdrant/Neo4j 真实探活(与 readyz 同语义), 现十一项全绿
+- docs/operations.md 运维手册(备份/迁移/排障/指标告警) + docs/deploy.md
+- Dockerfile 多阶段镜像 + docker-compose 本地全栈(app+MySQL+RabbitMQ+
+  Redis, Qdrant/Neo4j 本地容器注释备选)
+- guardrail eval: 20 恶意+20 良性样本集(六类攻击+防误杀设计),
+  真实数字检出率 85% 误杀率 0%, --ci 阈值门禁(>=60%/<=20%)进 CI eval job;
+  数据集逮到真实盲区(disregard THE above 逃过 regex)
+- 记忆任务离线骨架评分 runner(10 任务 0.505~0.896, report_agent_tasks.md)
+- 中文稀疏模型: jieba 分词 + sha256 稳定哈希 1M 索引空间(Qdrant 服务端
+  IDF 代算), sparse_model 可配置; 真云实验: fastembed hybrid 0.9833=
+  dense(Phase 3 差距系 embedding 模型所致), jieba 0.9667 未跑赢(诚实结论)
+- 版本 0.2.0 (PyPI 发布走 check_publish 门禁)
+- 测试 422 全绿, ruff 0, 凭据扫描干净
+'@
