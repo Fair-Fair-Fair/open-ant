@@ -136,6 +136,14 @@ python -m evals.sparse_zh_experiment       # 中文稀疏模型真云对照实�
 python check_publish.py                    # 发布前密钥扫描门禁（非零禁止上传）
 ```
 
+## 架构与面试题
+
+仓库内 [`interview.md`](./interview.md) 整理了**项目设计与面试题集**：
+- **Project 部分**——系统全景图与九大关键流程的完整流转路径（事件流转 / Agent Loop 与 LLM Loop / 记忆写入 / 检索 / Context 与 Prompt 组装 / 工具执行 / SubAgent / 配置与凭据 / 基础设施角色速查），每个流程定位到具体文件，帮助快速熟悉代码库；
+- **Interview 部分**——22 道 Agent 方向面试题与基于真实实现的回答大纲（含可追问的代码落点与诚实的边界声明）。
+
+欢迎分享给更多人，也欢迎在 issue 里补充新的面试题。
+
 ## 当前边界（诚实声明）
 
 - 单机单进程模型：EventBus 已基于 RabbitMQ 可横向扩展，worker 多副本部署为后续方向

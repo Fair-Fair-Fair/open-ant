@@ -1,0 +1,330 @@
+# Open-Ant 架构与面试题集
+
+> 本文档分两部分：**Project** —— 系统各关键流程在项目内的完整流转路径（架构图 / Agent Loop / LLM Loop / 组件设计 / 技术栈作用 / 配置流转），供阅读者快速熟悉仓库；**Interview** —— 面试题与基于真实实现的回答大纲，供作者自测与复盘。
+> 所有流程均可在代码中定位：仓库根为 `src/`，包在 `ant/` 下；数字与结论均可复现（见 README「测试与评测」）。
+
+---
+
+# Project
+
+## 0. 系统全景
+
+```text
+                     CLI │ Telegram │ Discord │ WebSocket(认证+限流)
+                        │            │          │
+                        ▼            ▼          ▼
+                ┌───────────────────────────────────────┐
+                │          CompositeBus                  │
+                │   持久事件 ──► RabbitMQ / Outbox       │
+                │   (durable + DLX五级重试 + DLQ)        │
+                │   瞬态事件(流式token/确认) ──► 进程内   │
+                └──────────────┬────────────────────────┘
+                               │ 消费(幂等去重)
+        ┌──────────────┬───────┴────────┬──────────────┐
+        ▼              ▼                ▼              ▼
+  AgentWorker    DeliveryWorker   ChannelWorker   CronWorker
+        │
+        ▼
+┌────────────────────────────────────────────────────┐
+│         StreamPipeline（9 阶段洋葱中间件链）         │
+│  Validation → InputGuard(regex+LLM-judge) →        │
+│  Observability → ContextBuild → ContextGuard →     │
+│  LLMCall(Router+StreamRedactor) → ToolExecution    │
+│  (确认先行→写类串行→只读并行+超时) → OutputGuard    │
+│  → Terminal (断流兜底)                              │
+└───────────────┬────────────────────────────────────┘
+                │
+   ┌────────────┼────────────────┬────────────────┐
+   ▼            ▼                ▼                ▼
+ MySQL      RabbitMQ          Qdrant(dense+     Neo4j(记忆图:
+ (历史/审计  (事件总线)         sparse hybrid)    冲突仲裁/衰减)
+ /成本/outbox)                  │                │
+   │            │               ▼                ▼
+   └──── Redis ─┘       检索管线: 改写→hybrid→子图扩展→rerank→定界注入
+    (embedding缓存/限流)         │
+                                ▼
+                    Prometheus /metrics · /healthz · /readyz
+```
+
+## 1. 事件流转（入站 → 出站）
+
+```
+Channel 收到消息
+  → ChannelWorker 构造 InboundEvent（含 source/session_id）
+  → CompositeBus.publish
+      ├─ 瞬态事件(StreamChunk/Confirmation*) → 进程内 InMemoryBus
+      └─ 持久事件 → outbox_writer 闭包:
+           1. 开新 MySQL session
+           2. outbox_ops.enqueue 写 outbox_events 行（与业务同事务）
+           3. commit —— 状态写入 ⇔ 事件发出原子化
+  → OutboxPublisher 轮询(1s) published_at IS NULL 的行
+  → 投递 RabbitMQ（durable 队列, prefetch=1, manual ack）
+  → 消费端 handler 正常返回 → 自动 ack；抛异常 → nack → DLX
+  → ant.retry 五级 TTL(5s→30min) → x-death>5 → ant.dlq
+```
+
+**设计要点**：outbox 保证崩溃不丢消息；DLX 重试把"失败即不确认"升级为 broker 语义；`processed_messages` 幂等去重（message_id 透传，重复投递只处理一次）。
+
+## 2. Agent Loop 与 LLM Loop（一次用户消息的完整生命周期）
+
+```
+AgentWorker.dispatch_event(InboundEvent)
+  ├─ record_event_consumed 埋点
+  ├─ rabbitmq 模式幂等检查（processed_messages）
+  ├─ 会话解析：history_store → routing → 斜杠命令 → Agent
+  └─ session.harness_stream_chat(message)
+       ├─ 截断上一轮 tool 结果 / reset 确认缓存 / 检索记忆注入
+       ├─ StreamPipeline（9 阶段, 每轮 LLM 调用都重跑整个洋葱链）
+       │    LLMCallStage: Router 流式调用
+       │       token → StreamRedactor(滑动缓冲先审后出) → 前端
+       │       tool_calls → ToolExecutionStage
+       │          JSON Schema 校验 → 三步执行计划 → 结果回传
+       │       usage → usage_recorder 落库
+       │    stop_reason == "tool_calls" → run() 循环重跑全链
+       │    stop_reason == "stop" → TerminalStage 落库 + done
+       └─ FSM 终态 + trace 汇总 + 异步记忆提取
+  → OutboundEvent → DeliveryWorker → channel.reply → 用户
+```
+
+**防死循环**：`max_iterations`（ValidationStage 达上限时置 `stop_reason="exhausted"` 终止外层循环——这是验收时修过的真 bug）；单工具硬超时；FSM EXHAUSTED 态。
+**防断流**：GeneratorExit/CancelledError 时写占位消息"响应中断"，会话可继续；流式 token 不进 broker（进程内直连，断网不影响事件可靠性）。
+
+## 3. 记忆写入流（提取 → 双存储 → 仲裁）
+
+```
+用户对话若干轮 → memory_guard.extract_memories
+  → extraction.extract_memories：工具调用约束 JSON
+     (extract_memories tool schema, temperature 0.2)
+  → 单条坏数据丢弃 + warning（不连坐整批）
+  → 每条记忆:
+     ├─ Neo4j detect_conflicts（同实体+同类别+更旧, top 3）
+     │    有冲突 → LLM 仲裁 keep_new/keep_old/merge
+     │    keep_new/merge → mark_superseded 建边
+     ├─ MemoryGraph.ingest：MERGE 记忆节点 + 实体 + MENTIONED_IN
+     └─ QdrantStore.add：dense(dashscope/bge) + sparse(BM25/jieba)
+          双命名向量 + payload（源/类别/重要度/关键词/时间戳）
+  → 软归档：archive_stale(低重要度+过期) → archived=true（不物理删）
+```
+
+## 4. 检索流（改写 → hybrid → 图扩展 → 重排 → 注入）
+
+```
+MemoryRetriever.retrieve(query)
+  ├─ query 改写（memory.query_rewrite_enabled, 默认关, 失败回退原 query）
+  ├─ QdrantStore.query(prefer_hybrid=True)
+  │    服务端 prefetch: dense + sparse 双分支 → RRF 融合
+  │    （payload filter / 分数 min-max 归一化）
+  ├─ graph.expand(hit ids)：一跳子图
+  │    同实体其他记忆 + SUPERSEDES 链上较新记忆（archived 排除）
+  ├─ 合并去重（doc id）
+  ├─ rerank（cross-encoder, to_thread, 失败原序返回）
+  └─ format_for_prompt：每条 <retrieved> 定界 + 不可信数据声明
+        → prompt_builder 第 6 层注入 system prompt
+```
+
+## 5. Context 与 Prompt 组装
+
+```
+PromptBuilder.build（六层, 每次 LLM 调用前重建）
+  Identity(AGENT.md) → Soul(SOUL.md) → Bootstrap(BOOTSTRAP.md+定时任务)
+  → Runtime(agent id/时间) → Channel Hint(平台提示) → Memory(RAG 定界注入)
+
+ContextGuard 三级防御（160k 动态阈值 = get_model_info×0.8）
+  1. tool 结果截断(1000 字符)
+  2. litellm token_counter 估算
+  3. LLM 摘要压缩（summarize_model 小模型优先；失败硬截断兜底）
+```
+
+## 6. 工具执行流（三步计划）
+
+```
+LLM 返回 tool_calls → ToolRegistry.execute_tool
+  ├─ JSON Schema 校验（additionalProperties:false；失败返回点名错误串）
+  ├─ governance.check_permission（白/黑名单+限额）
+  └─ 三步执行计划（StreamToolExecutionStage）:
+       ① require_confirmation 工具：先行逐个串行 + 审批流
+       ② 写类(write/edit/bash)：按 LLM 顺序串行（防竞态）
+       ③ 只读：gather 并行 + Semaphore(max_parallel_tools)
+     每工具 wait_for(tool_timeout) 硬超时 → 错误串回传
+     结果按 LLM 原始顺序还原；审计 fire-and-forget 落 audit_log
+```
+
+## 7. SubAgent 流转
+
+```
+主 Agent 调用 subagent_dispatch 工具
+  → 校验 agent 存在 → 创建子会话(绑 parent_session_id)
+  → 订阅 DispatchResultEvent → publish DispatchEvent(带 timeout 预算)
+  → AgentWorker 消费 → 子会话 harness_stream_chat
+  → DispatchResultEvent 回传 → 主侧 wait_for(timeout_seconds 10-600s)
+  → 超时返回错误串；主任务取消 → 级联取消子任务（单进程内传递）
+```
+
+## 8. 配置与凭据流转
+
+```
+config.user.yaml（workspace 级：后端开关/模型/护栏/记忆参数）
+  └─ Config(pydantic v2) + watchdog 热重载（仅 yaml）
+.env（凭据分量：MYSQL_USERNAME/PASSWORD、RABBITMQ_*、QDRANT_URL/KEY、
+     NEO4J_URI/USER/PASSWORD、各 API key）
+  └─ InfraSettings(pydantic-settings, 环境变量优先)
+       → mysql_dsn()/rabbitmq_url()/qdrant_url()… 组装连接串
+       → SharedContext 装配：凭据缺失 → 显式 WARNING 回退
+         (mysql→jsonl, rabbitmq→memory)；doctor 会报 ERROR
+凭据纪律：值只在 .env；日志/测试/文档零泄露（check_publish 门禁）
+```
+
+## 9. 基础设施角色速查
+
+| 组件 | 职责 | 关键文件 |
+|---|---|---|
+| MySQL | 会话/消息/outbox/审计/成本/幂等表 | `storage/`（SQLAlchemy async + Alembic） |
+| RabbitMQ | 持久事件总线（DLX 重试阶梯 + DLQ） | `bus/rabbitmq.py` |
+| Redis | embedding 缓存（挂则直算）、滑窗限流 | `provider/memory/embedding.py`、`server/rate_limit.py` |
+| Qdrant | dense+sparse 双向量 hybrid（服务端 RRF） | `provider/memory/qdrant_store.py` |
+| Neo4j | 记忆图（冲突检测/SUPERSEDES/软归档） | `memory/graph.py` |
+| litellm Router | LLM 重试/超时/降级/成本 | `provider/llm/base.py` |
+
+---
+
+# Interview
+
+> 每题给出基于**真实实现**的回答大纲（含可追问的落点）。诚实优先：没做/有边界的地方明确说，并给出改进方向——这比硬答更有说服力。
+
+### 1. 记忆更新过程中，如何保证语义匹配准确性？匹配错误如何处理？
+
+- **准确性三层**：① 写入侧：提取用工具调用约束 JSON（schema 强约束字段与类型，temperature 0.2），单条坏数据丢弃不连坐；② 检索侧：dense+sparse 双向量 + RRF 融合 + cross-encoder 重排 + Neo4j 子图扩展；③ 验证侧：30 条标注查询 eval，recall@5 = 0.983（数字可复现）。
+- **匹配错误处理**：冲突检测（同实体+同类别+更旧事实 top3）→ LLM 仲裁 keep_new/keep_old/merge → SUPERSEDES 边记录取代关系；低重要度旧记忆软归档；检索失败一律降级返回（不炸链路）。
+- 可追问落点：`memory/graph.py` detect_conflicts 的 Cypher 条件；`evals/report_retrieval.md`。
+
+### 2. 为什么采用 Agent 架构？相比 Workflow 编排的优势？
+
+- **本质区别**：Workflow 是确定性图（节点边预先定义），Agent 是"模型在循环里自主决策"（tool-calling loop）。开放任务（文件操作、检索、搜索混合）无法预先枚举路径，Agent 更合适；固定流程（如数据 ETL）Workflow 更稳。
+- **本项目的 Agent 化设计**：事件总线解耦（协议三实现可替换）、9 阶段管线把不确定性的每一面都加了约束（护栏/预算/超时/审计）。
+- **边界**：`max_iterations=10` + 单工具超时 + 写类串行，就是"Agent 自由度的收敛边界"——这是 Agent 与 Workflow 之间光谱的位置：自由决策 + 硬约束。
+- 可追问落点：`stream_pipeline.py` 的循环条件、`stream_stages.py` 三步执行计划。
+
+### 3. 全流程自动化（无人工审核）如何保证稳定性与可靠？
+
+- **四道自动化防线**：沙箱（路径/Docker/网络）、护栏（regex+judge 输入、流式脱敏输出）、治理（限额+审计落库）、预算（迭代上限+工具超时）。
+- **可靠性兜底**：LLM 重试/超时/降级链；消息 at-least-once+幂等+DLQ；断流占位消息；所有"可降级组件"失败都不炸主链路（原则 11）。
+- **稳定性观测**：Prometheus 指标 + `/readyz` 真探活 + doctor 自检 + crash 指数退避重启。
+- **风险承认**：审批流（require_confirmation）默认只覆盖配置内的高危工具；全自动场景下应把写类工具纳入审批或限定沙箱目录——诚实说这是配置取舍而非机制缺失。
+
+### 4. 多工具调用整体流程如何设计？如何管理调用顺序？
+
+- 见 Project §6 三步执行计划：① 需审批工具先行串行（审批语义独立）；② 写类串行（确定性、防同文件竞态）；③ 只读并行（Semaphore 限流、单工具硬超时）。
+- **顺序管理**：结果按下标还原 LLM 原始顺序（下游消息组装不变）；写类顺序 = LLM 返回顺序（意图顺序）。
+- 可追问落点：`stream_stages.py::StreamToolExecutionStage`；`test_pipeline_parallel.py` 的耗时断言。
+
+### 5. 大模型调用外部工具的底层机制？模型如何决定调用哪个工具？
+
+- 机制：请求里注入 `tools` 数组（JSON Schema：name/description/parameters）；模型在生成中返回 `tool_calls`（id + function.name + arguments JSON 串）；执行器按 name 分发执行；结果以 `role:"tool"` 消息回传；循环直到 `finish_reason="stop"`。
+- 流式细节：tool_calls 的 arguments 跨 chunk 增量累积（index 对齐）；本项目修过 `tc["id"]` 缺失 KeyError 与多工具 index 兜底。
+- 模型"决定"：由 schema 的 description 驱动选择——所以本项目把工具描述当 prompt 工程做（补行为约束、错误回传约定）。
+
+### 6. Agent 系统核心模块与职责？
+
+- 管线层（校验/护栏/上下文构建/守卫/LLM 调用/工具执行/输出护栏/终结）、记忆层（短期=会话+ContextGuard；长期=Qdrant+Neo4j）、工具层（schema 校验/沙箱/治理/审计）、通道层（四平台统一事件）、观测层（metrics/探活/埋点）。
+- 每个模块都有独立文件与测试映射（422 用例）。
+
+### 7. 短期记忆 vs 长期记忆及实现方式？
+
+- **短期**：会话 messages（MySQL 持久化）+ ContextGuard 三级防御（截断→估算→摘要压缩，阈值按模型动态 0.8×max_input_tokens）+ 断流占位保持会话可续。
+- **长期**：见 Project §3/§4——提取（约束 JSON）→ 双存储（Qdrant 语义 + Neo4j 图关系）→ 冲突仲裁 → 时间衰减软归档；Redis 只做 embedding 缓存。
+- 差异点：记忆有**生命周期**（冲突/取代/归档），不是无限 append 的向量库。
+
+### 8. Agent Harness 关键能力？企业级为什么需要？
+
+- Harness = 约束 LLM 不确定性的运行时层：沙箱（动作边界）、护栏（内容边界）、治理（频率与权限边界）、预算（迭代/超时边界）、观测（可审计边界）、可靠（重试/降级边界）。
+- 企业级需要：可审计（每次工具调用落库）、可回滚（沙箱）、可观测（成本/延迟/失败率）、可证明（eval 门禁）。裸调 API 这些全没有。
+
+### 9. Skill 懒加载机制？为什么需要？
+
+- 实现：`skill_loader.discover_skills()` 扫描 SKILL.md（frontmatter+正文）；agent 的 `_build_tools` 时注册 skill 工具；skill 定义只在被调用时解析。
+- 为什么：按需加载定义、不常驻内存；多 agent 各自只注册允许的 skill。
+- **诚实**：当前 discover 每次调用全盘重扫（无缓存）——这是已知改进点（文件监听+缓存），面试时主动提出。
+
+### 10. 消息队列如何保证不丢？生产端/消费端分别做了什么？
+
+- **生产端**：outbox 模式——事件与业务状态同事务落 MySQL，publisher confirm 后标记，崩溃不丢。
+- **Broker**：durable 队列 + persistent 消息。
+- **消费端**：manual ack；失败 nack → DLX 五级 TTL 重试（5s→30min）→ 超 5 次进 DLQ（可人工补偿）；幂等：processed_messages 唯一键，重复投递只处理一次。
+- **瞬态分流**：流式 token/确认不进 broker（进程内直连）——网络往返只付给业务事件。
+- 验证：真实 broker 集成测试覆盖 round-trip/DLQ/message_id 透传。
+
+### 11. RAG 用什么实现？多格式文件怎么解析？
+
+- 自研管线（Qdrant + Neo4j），未用 LangChain 全家桶；文档解析用 langchain-community loaders（pdf/docx/csv/json/html/pptx/xlsx 统一 chunk），确定性 chunk id 幂等重入。
+- **诚实**：不同格式目前共用一套 chunk 策略，没有定向优化（如 PDF 按标题切分/表格结构化）——这是明确的未来方向。
+
+### 12. 做过哪些优化提升召回率与准确率？
+
+- 双向量 hybrid + RRF；cross-encoder 重排；Neo4j 子图扩展；query 改写；diversity_by_source（防长文档挤占窗口）。
+- **数据驱动**：eval 对照发现英文稀疏模型拖累中文（0.917<0.983），换 bge-small-zh 后 hybrid 追平 0.983；jieba 中文稀疏实验（0.967）未跑赢——保留 fastembed 默认。所有结论有报告。
+
+### 13. 交给成熟产品（开源/阿里/字节）会不会更好？为什么自研？
+
+- **边界判断**：成熟产品胜在开箱即用与生态；自研的价值在①对链路的完全可控（出问题能定位到行）②深度定制（图记忆冲突仲裁是通用 RAG 产品没有的）③学习价值。
+- **诚实的折中**：不该自研的全用成熟件——LLM 接入用 litellm（而非自写 provider）、文档解析用 langchain loaders、消息用 RabbitMQ（而非自写队列）。"自研调度与记忆语义，借力成熟基础设施"。
+- 有数据支撑：eval 报告证明自研检索的分数可量化、可对照。
+
+### 14. 你的产品看起来像一个小 Agent，你认为是吗？
+
+- **承认定位**：是"个人助手级运行时"，不是平台级产品——功能面（四通道/工具数）确实小。
+- **但工程深度是生产级**：五组件基础设施集成验证、422 测试、三套 eval、at-least-once 消息语义、密钥门禁。小不等于玩具；玩具的判据是"能不能经受故障与追问"，本项目每一层都有测试与真实集成兜底。
+- 对比 Claude Code/OpenClaw：能力覆盖更窄，但可靠性工程链路完整可讲。
+
+### 15. Agent 怎么判断任务执行完而不死循环？底层逻辑？
+
+- **正常退出**：`finish_reason="stop"`（模型不再请求工具）。
+- **兜底**：`max_iterations=10`——达上限时 ValidationStage 置 `stop_reason="exhausted"` 终止外层循环（验收时修过"只 yield error 不改 stop_reason 导致无限循环"的真 bug）；单工具 `wait_for` 超时；FSM EXHAUSTED 态；子代理超时+取消传播。
+- 如果我来设计防死循环：迭代上限、单步超时、token 预算、重复动作检测（连续相同 tool_calls 提前熔断——本项目尚未做，可作改进点）。
+
+### 16. 了解 MCP 或 Skills 吗？自己写过吗？
+
+- 概念清楚：MCP = 模型上下文协议（tools/resources/prompts 标准化，Agent 生态的 USB-C）；Skills = 可复用能力包。
+- **本项目**：有 Skill 系统（SKILL.md 定义 + 懒加载注册），工具 schema 手写 JSON Schema（与 MCP 同构思想）；**未实现 MCP server/client**——是明确的生态接入方向（接入后工具面直接扩到社区生态）。
+
+### 17. 页面断网几秒又恢复，协议层怎么处理？
+
+- **流式层**：token 走进程内直连（不进 broker），断网 = WS 断开 → GeneratorExit → 写占位消息"响应中断"，会话状态已持久化，重连后按 source 恢复同一会话继续。
+- **事件层**：RabbitMQ `connect_robust` 自动重连；投递失败 nack→DLX 重试（不依赖客户端在线）。
+- **消费层**：幂等去重保证"重连重投"不产生重复回复。
+- 诚实：WS 重连后的 token 续流（断点续传）未实现——占位恢复是当前语义。
+
+### 18. 系统架构是什么？最难的问题如何解决？
+
+- 架构：见 Project §0 全景图（一句话：事件总线 + 9 阶段管线的多智能体运行时，五组件基础设施）。
+- **最难的三件事**：① 崩溃一致性——outbox 同事务 + broker 至少一次 + 消费幂等三件套；② LLM 不确定性收敛——六层边界（沙箱/护栏/治理/预算/观测/可靠）；③ 流式体验与可靠性语义的冲突——瞬态/持久事件分流（token 不进 broker）。
+- 实战证据：真云验收抓出的坑（payload 索引 400、point id UUID、Result 会话内消费、StaticPool 回滚竞态）——每个都有修复与测试。
+
+### 19. BM25 原理？为什么对词频饱和处理？
+
+- 公式：`score(D,Q) = Σ IDF(qi) · f(qi,D)·(k1+1) / (f(qi,D) + k1·(1−b+b·|D|/avgdl))`；IDF 用 BM25+ 变体 `log(1+(N−df+0.5)/(df+0.5))`。
+- **饱和**：k1（默认 1.5）抑制词频线性增长——"出现 10 次"不等于"相关 10 倍"（对齐人类直觉：2 次到 4 次比 8 次到 10 次更有区分度）；b 控制文档长度惩罚。
+- 项目里：Qdrant 服务端 sparse（fastembed Qdrant/bm25）+ IDF modifier 代算全局 IDF；备选 jieba 中文分词方案（sha256 稳定哈希索引空间）。
+
+### 20. 为什么不使用 LangChain/LangGraph？
+
+- **选型边界**：LLM 接入用 litellm Router（LangChain 同源），但编排自研——LangGraph 是图编排抽象，本项目是**运行时**（事件总线+管线+治理），两者解决的问题不同：图编排解决"流程怎么走"，运行时解决"流程之外发生什么"（崩溃、重试、审计、隔离）。
+- **自研的理由**：at-least-once 消息语义/幂等/DLQ、图记忆冲突仲裁，框架生态没有现成；学习与控制链路。
+- **兜底**：422 测试 + eval 证明自研部分的质量；该用成熟件的（解析、消息、向量库）全部用成熟件——"自研的是语义，不是轮子"。
+
+### 21. Agent 框架中规划、执行、工具、模型如何分层？
+
+- **规划**：Agent 自主（tool-calling 循环 + max_iterations/预算约束）——本项目不做显式 planner，靠模型+约束。
+- **执行**：三步执行计划（审批/写类/只读）+ 单工具超时 + 审计。
+- **工具**：schema 校验 + 沙箱前置 + 治理限额——工具层不信任模型输入。
+- **模型**：Router 抽象（可换模型/降级链），业务代码不感知具体 provider。
+- 分层解耦的证据：bus/storage/llm/tools 各自 Protocol，测试可独立替换实现。
+
+### 22. 多 Agent 协作中，如何证明消息没有被重复消费或遗漏？
+
+- **不重复**：processed_messages 表（message_id 唯一键）——消费前查、处理成功插入；重复投递直接跳过并 ack。集成测试：真实 broker 重复投递同 message_id → 只处理一次。
+- **不遗漏**：outbox 同事务（发出即落库）+ publisher confirm + 失败进 DLX/DLQ（永不静默丢弃）+ DLQ 可人工补偿。
+- **单进程级联**：子代理任务按 parent_session_id 注册，父任务取消级联取消子任务（跨进程取消是明确边界，如实说明）。
+
+---
+
+*本文档与代码同步维护：每个流程指向的实现文件若重构，请同步更新对应章节。*
