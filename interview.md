@@ -7,6 +7,8 @@
 
 # Project
 
+> 阅读约定：每个流程图的节点都可定位到代码——统一使用 `文件路径.类名.方法名` 记法（如 `bus/outbox.py::OutboxPublisher.run`），§1-§9 每节开头附「组件定位」清单。
+
 ## 0. 系统全景
 
 ```text
@@ -48,142 +50,177 @@
 
 ## 1. 事件流转（入站 → 出站）
 
+> 组件定位：`bus/composite.py::CompositeBus`、`bus/memory.py::InMemoryBus`、`bus/rabbitmq.py::RabbitMqBus`、`bus/outbox.py::OutboxPublisher`、`storage/outbox_ops.py::enqueue`、`core/context.py::SharedContext._build_outbox_writer`、`server/dedup.py`
+
 ```
 Channel 收到消息
-  → ChannelWorker 构造 InboundEvent（含 source/session_id）
-  → CompositeBus.publish
-      ├─ 瞬态事件(StreamChunk/Confirmation*) → 进程内 InMemoryBus
-      └─ 持久事件 → outbox_writer 闭包:
+  → channel_worker.py::ChannelWorker._create_callback
+      构造 InboundEvent（含 source/session_id）
+  → bus/composite.py::CompositeBus.publish
+      ├─ 瞬态事件(StreamChunk/Confirmation*) → bus/memory.py::InMemoryBus
+      └─ 持久事件 → context.py::SharedContext._build_outbox_writer 闭包:
            1. 开新 MySQL session
-           2. outbox_ops.enqueue 写 outbox_events 行（与业务同事务）
+           2. storage/outbox_ops.py::enqueue 写 outbox_events 行（与业务同事务）
            3. commit —— 状态写入 ⇔ 事件发出原子化
-  → OutboxPublisher 轮询(1s) published_at IS NULL 的行
+  → bus/outbox.py::OutboxPublisher.run 轮询(1s) published_at IS NULL 的行
   → 投递 RabbitMQ（durable 队列, prefetch=1, manual ack）
-  → 消费端 handler 正常返回 → 自动 ack；抛异常 → nack → DLX
-  → ant.retry 五级 TTL(5s→30min) → x-death>5 → ant.dlq
+  → bus/rabbitmq.py::RabbitMqBus._on_message
+       handler 正常返回 → 自动 ack；抛异常 → nack → DLX
+  → bus/rabbitmq.py::RabbitMqBus._on_retry_message
+      ant.retry 五级 TTL(5s→30min) → x-death>5 → ant.dlq
 ```
 
-**设计要点**：outbox 保证崩溃不丢消息；DLX 重试把"失败即不确认"升级为 broker 语义；`processed_messages` 幂等去重（message_id 透传，重复投递只处理一次）。
+**设计要点**：outbox 保证崩溃不丢消息；DLX 重试把"失败即不确认"升级为 broker 语义；`server/dedup.py::mark_processed` 幂等去重（message_id 透传，重复投递只处理一次）。
 
 ## 2. Agent Loop 与 LLM Loop（一次用户消息的完整生命周期）
 
+> 组件定位：`server/agent_worker.py::AgentWorker`、`core/agent.py::AgentSession.harness_stream_chat`、`core/stream_pipeline.py::StreamPipeline.run`、`core/stream_stages.py::StreamLLMCallStage`、`core/stream_stages.py::StreamToolExecutionStage`、`core/guardrails.py::StreamRedactor`、`provider/llm/usage.py::UsageRecorder`、`core/session_fsm.py::SessionFSM`
+
 ```
-AgentWorker.dispatch_event(InboundEvent)
-  ├─ record_event_consumed 埋点
-  ├─ rabbitmq 模式幂等检查（processed_messages）
+server/agent_worker.py::AgentWorker.dispatch_event(InboundEvent)
+  ├─ server/observability.py::record_event_consumed 埋点
+  ├─ rabbitmq 模式幂等检查（server/dedup.py::is_processed）
   ├─ 会话解析：history_store → routing → 斜杠命令 → Agent
-  └─ session.harness_stream_chat(message)
+  └─ core/agent.py::AgentSession.harness_stream_chat(message)
        ├─ 截断上一轮 tool 结果 / reset 确认缓存 / 检索记忆注入
-       ├─ StreamPipeline（9 阶段, 每轮 LLM 调用都重跑整个洋葱链）
-       │    LLMCallStage: Router 流式调用
-       │       token → StreamRedactor(滑动缓冲先审后出) → 前端
-       │       tool_calls → ToolExecutionStage
-       │          JSON Schema 校验 → 三步执行计划 → 结果回传
-       │       usage → usage_recorder 落库
-       │    stop_reason == "tool_calls" → run() 循环重跑全链
-       │    stop_reason == "stop" → TerminalStage 落库 + done
-       └─ FSM 终态 + trace 汇总 + 异步记忆提取
-  → OutboundEvent → DeliveryWorker → channel.reply → 用户
+       ├─ core/stream_pipeline.py::StreamPipeline.run（9 阶段洋葱链）
+       │    core/stream_stages.py::StreamLLMCallStage.execute
+       │       token → guardrails.py::StreamRedactor.feed(滑动缓冲先审后出) → 前端
+       │       tool_calls → stream_stages.py::StreamToolExecutionStage.execute
+       │          tools/base.py::validate_args → 三步执行计划 → 结果回传
+       │       usage → provider/llm/usage.py::UsageRecorder.record_usage 落库
+       │    stop_reason == "tool_calls" → StreamPipeline.run 循环重跑全链
+       │    stop_reason == "stop" → stream_stages.py::StreamTerminalStage 落库 + done
+       └─ core/session_fsm.py::SessionFSM 终态 + trace 汇总 + 异步记忆提取
+  → OutboundEvent → server/delivery_worker.py::DeliveryWorker.handle_event
+      → channel.reply → 用户
 ```
 
-**防死循环**：`max_iterations`（ValidationStage 达上限时置 `stop_reason="exhausted"` 终止外层循环——这是验收时修过的真 bug）；单工具硬超时；FSM EXHAUSTED 态。
-**防断流**：GeneratorExit/CancelledError 时写占位消息"响应中断"，会话可继续；流式 token 不进 broker（进程内直连，断网不影响事件可靠性）。
+**防死循环**：`max_iterations`（`stream_stages.py::StreamValidationStage` 达上限时置 `stop_reason="exhausted"` 终止外层循环——这是验收时修过的真 bug）；单工具硬超时（`asyncio.wait_for`）；FSM EXHAUSTED 态。
+**防断流**：`core/stream_pipeline.py::StreamPipeline.run` 捕获 GeneratorExit/CancelledError 时写占位消息"响应中断"，会话可继续；流式 token 不进 broker（进程内直连，断网不影响事件可靠性）。
 
 ## 3. 记忆写入流（提取 → 双存储 → 仲裁）
 
+> 组件定位：`core/memory_guard.py::MemoryGuard.extract_memories`、`memory/extraction.py::extract_memories`、`memory/graph.py::MemoryGraph`、`provider/memory/qdrant_store.py::QdrantStore.add`
+
 ```
-用户对话若干轮 → memory_guard.extract_memories
-  → extraction.extract_memories：工具调用约束 JSON
+用户对话若干轮 → core/memory_guard.py::MemoryGuard.extract_memories
+  → memory/extraction.py::extract_memories：工具调用约束 JSON
      (extract_memories tool schema, temperature 0.2)
   → 单条坏数据丢弃 + warning（不连坐整批）
   → 每条记忆:
-     ├─ Neo4j detect_conflicts（同实体+同类别+更旧, top 3）
+     ├─ memory/graph.py::MemoryGraph.detect_conflicts
+     │    （同实体+同类别+更旧, top 3）
      │    有冲突 → LLM 仲裁 keep_new/keep_old/merge
-     │    keep_new/merge → mark_superseded 建边
-     ├─ MemoryGraph.ingest：MERGE 记忆节点 + 实体 + MENTIONED_IN
-     └─ QdrantStore.add：dense(dashscope/bge) + sparse(BM25/jieba)
-          双命名向量 + payload（源/类别/重要度/关键词/时间戳）
-  → 软归档：archive_stale(低重要度+过期) → archived=true（不物理删）
+     │    keep_new/merge → memory/graph.py::MemoryGraph.mark_superseded 建边
+     ├─ memory/graph.py::MemoryGraph.ingest
+     │    MERGE 记忆节点 + 实体 + MENTIONED_IN
+     └─ provider/memory/qdrant_store.py::QdrantStore.add
+          dense(dashscope/bge) + sparse(BM25/jieba) 双命名向量
+          + payload（源/类别/重要度/关键词/时间戳）
+  → 软归档：memory/graph.py::MemoryGraph.archive_stale
+       (低重要度+过期) → archived=true（不物理删）
 ```
 
 ## 4. 检索流（改写 → hybrid → 图扩展 → 重排 → 注入）
 
+> 组件定位：`core/memory_retriever.py::MemoryRetriever.retrieve`、`provider/memory/qdrant_store.py::QdrantStore.query`、`memory/graph.py::MemoryGraph.expand`、`memory/rerank.py::rerank`、`core/memory_retriever.py::MemoryRetriever.format_for_prompt`、`core/prompt_builder.py::PromptBuilder.build`
+
 ```
-MemoryRetriever.retrieve(query)
-  ├─ query 改写（memory.query_rewrite_enabled, 默认关, 失败回退原 query）
-  ├─ QdrantStore.query(prefer_hybrid=True)
+core/memory_retriever.py::MemoryRetriever.retrieve(query)
+  ├─ core/memory_retriever.py::MemoryRetriever._rewrite_query
+  │    （memory.query_rewrite_enabled, 默认关, 失败回退原 query）
+  ├─ provider/memory/qdrant_store.py::QdrantStore.query(prefer_hybrid=True)
   │    服务端 prefetch: dense + sparse 双分支 → RRF 融合
   │    （payload filter / 分数 min-max 归一化）
-  ├─ graph.expand(hit ids)：一跳子图
+  ├─ memory/graph.py::MemoryGraph.expand(hit ids)：一跳子图
   │    同实体其他记忆 + SUPERSEDES 链上较新记忆（archived 排除）
   ├─ 合并去重（doc id）
-  ├─ rerank（cross-encoder, to_thread, 失败原序返回）
-  └─ format_for_prompt：每条 <retrieved> 定界 + 不可信数据声明
-        → prompt_builder 第 6 层注入 system prompt
+  ├─ memory/rerank.py::rerank（cross-encoder, to_thread, 失败原序返回）
+  └─ core/memory_retriever.py::MemoryRetriever.format_for_prompt
+       每条 <retrieved> 定界 + 不可信数据声明
+       → core/prompt_builder.py::PromptBuilder.build 第 6 层注入 system prompt
 ```
 
 ## 5. Context 与 Prompt 组装
 
+> 组件定位：`core/prompt_builder.py::PromptBuilder.build`、`core/context_guard.py::ContextGuard.check_and_compact`
+
 ```
-PromptBuilder.build（六层, 每次 LLM 调用前重建）
+core/prompt_builder.py::PromptBuilder.build（六层, 每次 LLM 调用前重建）
   Identity(AGENT.md) → Soul(SOUL.md) → Bootstrap(BOOTSTRAP.md+定时任务)
   → Runtime(agent id/时间) → Channel Hint(平台提示) → Memory(RAG 定界注入)
 
-ContextGuard 三级防御（160k 动态阈值 = get_model_info×0.8）
-  1. tool 结果截断(1000 字符)
-  2. litellm token_counter 估算
-  3. LLM 摘要压缩（summarize_model 小模型优先；失败硬截断兜底）
+core/context_guard.py::ContextGuard.check_and_compact 三级防御
+  （160k 动态阈值 = core/agent.py::Agent._get_token_threshold, get_model_info×0.8）
+  1. tool 结果截断(1000 字符)    —— ContextGuard._truncate_large_tool_results
+  2. litellm token_counter 估算 —— ContextGuard.estimate_tokens
+  3. LLM 摘要压缩               —— ContextGuard._compact_messages
+       （summarize_model 小模型优先；失败硬截断兜底）
 ```
 
 ## 6. 工具执行流（三步计划）
 
+> 组件定位：`tools/registry.py::ToolRegistry.execute_tool`、`tools/base.py::validate_args`、`tools/policy.py::ToolGovernance`、`core/stream_stages.py::StreamToolExecutionStage`、`core/agent.py::_make_audit_sink`
+
 ```
-LLM 返回 tool_calls → ToolRegistry.execute_tool
-  ├─ JSON Schema 校验（additionalProperties:false；失败返回点名错误串）
-  ├─ governance.check_permission（白/黑名单+限额）
-  └─ 三步执行计划（StreamToolExecutionStage）:
+LLM 返回 tool_calls → tools/registry.py::ToolRegistry.execute_tool
+  ├─ tools/base.py::validate_args
+  │    （additionalProperties:false；失败返回点名错误串）
+  ├─ tools/policy.py::ToolGovernance.check_permission（白/黑名单+限额）
+  └─ core/stream_stages.py::StreamToolExecutionStage 三步执行计划:
        ① require_confirmation 工具：先行逐个串行 + 审批流
        ② 写类(write/edit/bash)：按 LLM 顺序串行（防竞态）
        ③ 只读：gather 并行 + Semaphore(max_parallel_tools)
      每工具 wait_for(tool_timeout) 硬超时 → 错误串回传
-     结果按 LLM 原始顺序还原；审计 fire-and-forget 落 audit_log
+     结果按 LLM 原始顺序还原；审计 fire-and-forget
+       → core/agent.py::_make_audit_sink 落 audit_log
 ```
 
 ## 7. SubAgent 流转
 
+> 组件定位：`tools/subagent_tool.py::create_subagent_dispatch_tool`、`server/agent_worker.py::AgentWorker._cancel_subagent_tasks`
+
 ```
-主 Agent 调用 subagent_dispatch 工具
+主 Agent 调用 tools/subagent_tool.py::create_subagent_dispatch_tool
   → 校验 agent 存在 → 创建子会话(绑 parent_session_id)
   → 订阅 DispatchResultEvent → publish DispatchEvent(带 timeout 预算)
-  → AgentWorker 消费 → 子会话 harness_stream_chat
+  → server/agent_worker.py::AgentWorker.dispatch_event 消费
+      → 子会话 harness_stream_chat
   → DispatchResultEvent 回传 → 主侧 wait_for(timeout_seconds 10-600s)
-  → 超时返回错误串；主任务取消 → 级联取消子任务（单进程内传递）
+  → 超时返回错误串；主任务取消
+      → server/agent_worker.py::AgentWorker._cancel_subagent_tasks
+        级联取消子任务（单进程内传递）
 ```
 
 ## 8. 配置与凭据流转
 
+> 组件定位：`utils/config.py::Config`、`utils/settings.py::InfraSettings`、`core/context.py::SharedContext`、`cli/doctor.py`
+
 ```
 config.user.yaml（workspace 级：后端开关/模型/护栏/记忆参数）
-  └─ Config(pydantic v2) + watchdog 热重载（仅 yaml）
+  └─ utils/config.py::Config(pydantic v2) + watchdog 热重载（仅 yaml）
 .env（凭据分量：MYSQL_USERNAME/PASSWORD、RABBITMQ_*、QDRANT_URL/KEY、
      NEO4J_URI/USER/PASSWORD、各 API key）
-  └─ InfraSettings(pydantic-settings, 环境变量优先)
+  └─ utils/settings.py::InfraSettings(pydantic-settings, 环境变量优先)
        → mysql_dsn()/rabbitmq_url()/qdrant_url()… 组装连接串
-       → SharedContext 装配：凭据缺失 → 显式 WARNING 回退
-         (mysql→jsonl, rabbitmq→memory)；doctor 会报 ERROR
+       → core/context.py::SharedContext 装配
+           _create_history_store / _assemble_bus
+           凭据缺失 → 显式 WARNING 回退(mysql→jsonl, rabbitmq→memory)
+           cli/doctor.py 会报 ERROR
 凭据纪律：值只在 .env；日志/测试/文档零泄露（check_publish 门禁）
 ```
 
 ## 9. 基础设施角色速查
 
-| 组件 | 职责 | 关键文件 |
+| 组件 | 职责 | 关键文件.类.方法 |
 |---|---|---|
-| MySQL | 会话/消息/outbox/审计/成本/幂等表 | `storage/`（SQLAlchemy async + Alembic） |
-| RabbitMQ | 持久事件总线（DLX 重试阶梯 + DLQ） | `bus/rabbitmq.py` |
-| Redis | embedding 缓存（挂则直算）、滑窗限流 | `provider/memory/embedding.py`、`server/rate_limit.py` |
-| Qdrant | dense+sparse 双向量 hybrid（服务端 RRF） | `provider/memory/qdrant_store.py` |
-| Neo4j | 记忆图（冲突检测/SUPERSEDES/软归档） | `memory/graph.py` |
-| litellm Router | LLM 重试/超时/降级/成本 | `provider/llm/base.py` |
+| MySQL | 会话/消息/outbox/审计/成本/幂等表 | `storage/repository.py::MysqlHistoryRepository`、`storage/db.py::run_migrations`（SQLAlchemy async + Alembic） |
+| RabbitMQ | 持久事件总线（DLX 重试阶梯 + DLQ） | `bus/rabbitmq.py::RabbitMqBus._on_message / _on_retry_message` |
+| Redis | embedding 缓存（挂则直算）、滑窗限流 | `provider/memory/embedding.py::EmbeddingProvider._embed_cached`、`server/rate_limit.py::SlidingWindowLimiter.allow` |
+| Qdrant | dense+sparse 双向量 hybrid（服务端 RRF） | `provider/memory/qdrant_store.py::QdrantStore.query / _ensure_collection` |
+| Neo4j | 记忆图（冲突检测/SUPERSEDES/软归档） | `memory/graph.py::MemoryGraph.detect_conflicts / expand / archive_stale` |
+| litellm Router | LLM 重试/超时/降级/成本 | `provider/llm/base.py::LLMProvider.chat / stream_chat` |
 
 ---
 
