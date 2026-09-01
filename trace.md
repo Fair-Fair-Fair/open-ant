@@ -317,6 +317,11 @@ CorrelationId
 
 它本身就是现在比较主流的可观测性标准。
 
+> ✅ **本项目已落地（commit d93088d，Phase 6）**：`ant/observability/tracing.py`
+> —— OTLP 环境变量对接 Jaeger/Tempo/Collector；`trace_to_file` 落
+> `.logs/traces.jsonl`（本地可查询演示）；`tracer.py` 已桥接为 OTel 适配层
+> （管线调用点零改动）。
+
 架构可以是：
 
 ```text
@@ -517,9 +522,9 @@ ThreadLocal
 
 > **“你的 Agent Trace 怎么做？”**
 
-你可以说：
+你可以说（本项目已全部落地，把"我会采用"换成"我的实现是"）：
 
-> **“我会采用 OpenTelemetry 做统一的 Trace。一个用户请求生成一个 TraceId，Agent Runtime 中的 LLM 调用、Tool 调用、Agent 执行、EventBus publish/consume 都作为 Span。因为我的 Main Agent 和 SubAgent 是通过 EventBus 异步通信的，所以我不会依赖 ThreadLocal 传播上下文，而是在 Event Metadata 中显式携带 Trace Context，包括 traceId、spanId，同时用 correlationId 标识具体的异步任务。SubAgent 消费消息以后提取 Context 并创建自己的 Span，这样 Main Agent → EventBus → SubAgent → Tool → EventBus → Main Agent 整条链路都能串起来。最终把 Trace、Metrics、Logs 汇总到可观测性平台，用来分析 Agent 的延迟、Token 消耗、Tool 失败率以及具体请求的执行路径。”**
+> **“我的实现基于 OpenTelemetry：一个用户请求生成一个 TraceId（根 span `agent.run`），LLM 调用、Tool 调用、管线阶段、EventBus publish/consume 都是 Span。因为 Main Agent 和 SubAgent 通过 EventBus 异步通信，我不依赖 ThreadLocal，而是在事件载荷里显式携带 W3C traceparent——Producer 发布时注入当前 Span Context，Consumer 消费时 extract 并以 consume span 为父创建自己的 Span，这样 Main Agent → EventBus → SubAgent → Tool → EventBus → Main Agent 整条链路跨线程、跨进程都串在同一条 Trace 里。Span 属性只放 metadata（模型名/token 数/耗时/结果长度/状态），Prompt 与 Tool Payload 做脱敏不落 Trace。导出侧：OTLP 对接 Jaeger/Tempo/Collector，或落 JSONL 本地查询，禁用时零开销。”**
 
 然后**主动补一句**：
 
