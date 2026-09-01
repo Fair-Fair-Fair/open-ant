@@ -28,6 +28,7 @@ from ant.core.events import (
     OutboundEvent,
     StreamChunkEvent,
 )
+from ant.observability import tracing
 
 TRANSIENT_EVENT_CLASSES: tuple[type[Event], ...] = (
     StreamChunkEvent,
@@ -73,7 +74,14 @@ class CompositeBus:
         return issubclass(event_class, TRANSIENT_EVENT_CLASSES)
 
     async def publish(self, event: Event) -> None:
-        """Route an event: transient -> local bus; persistent -> outbox/durable."""
+        """Route an event: transient -> local bus; persistent -> outbox/durable.
+
+        Phase 6 tracing：发布前把当前活动 span 的 W3C traceparent 注入事件
+        载荷（trace.md §3/§9——异步消息里显式携带 Trace Context），消费端
+        据此把 MainAgent → EventBus → SubAgent 串成同一条 Trace。
+        """
+        if not event.traceparent and tracing.is_enabled():
+            event.traceparent = tracing.inject_current_traceparent()
         if self._is_transient_event(event):
             await self._local.publish(event)
             return

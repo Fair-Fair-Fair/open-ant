@@ -129,6 +129,9 @@ class Event:
     source: EventSource # Changed from str to typed EventSource
     content: str
     timestamp: float = field(default_factory=time.time)
+    # Phase 6 tracing：W3C traceparent 随事件载荷跨 EventBus 传播
+    # （trace.md §3/§9：异步消息里显式携带 Trace Context）。None = 未携带。
+    traceparent: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize event to dictionary, including type."""

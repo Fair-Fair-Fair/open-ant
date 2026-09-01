@@ -52,6 +52,7 @@ import aio_pika
 
 from ant.bus.base import Handler
 from ant.core.events import Event, deserialize_event
+from ant.observability import tracing
 
 logger = logging.getLogger(__name__)
 
@@ -244,8 +245,17 @@ class RabbitMqBus:
             # 把 broker 消息的 message_id 挂到事件上，供消费端幂等去重
             # （processed_messages 表）。Event 是无 slots 的 dataclass，动态属性安全。
             event.message_id = message.message_id
-            for handler in list(self._handlers.get(type(event), ())):
-                await handler(event)
+            # Phase 6 tracing：从事件载荷提取 traceparent，创建 consume span
+            # 并以 use_span 包裹 handler——后续 Agent/LLM/Tool span 全部挂到
+            # 消费链下（trace.md §8/§9：异步总线上的 Trace 传播）。
+            from opentelemetry import trace as otel_trace
+
+            span = tracing.start_consume_span(
+                type(event).__name__, getattr(event, "traceparent", None), "rabbitmq"
+            )
+            with otel_trace.use_span(span, end_on_exit=True):
+                for handler in list(self._handlers.get(type(event), ())):
+                    await handler(event)
             await message.ack()
         except Exception:
             logger.exception(

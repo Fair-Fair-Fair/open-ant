@@ -28,6 +28,7 @@ from typing import Callable
 
 from ant.bus.base import Handler
 from ant.core.events import Event, OutboundEvent, deserialize_event
+from ant.observability import tracing
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +146,20 @@ class InMemoryBus:
         logger.debug("Persisted outbound event to %s", final_path.name)
 
     async def _notify(self, event: Event) -> None:
-        for handler in list(self._handlers.get(type(event), [])):
-            try:
-                await handler(event)
-            except Exception:
-                logger.exception("Error in handler for %s", type(event).__name__)
+        # Phase 6 tracing：进程内总线同样从事件载荷重建 consume span——
+        # 子代理/回传链（MainAgent → DispatchEvent → SubAgent）在单进程
+        # 模型下也串成同一条 Trace（rabbitmq.py 同构逻辑）。
+        from opentelemetry import trace as otel_trace
+
+        span = tracing.start_consume_span(
+            type(event).__name__, getattr(event, "traceparent", None), "memory"
+        )
+        with otel_trace.use_span(span, end_on_exit=True):
+            for handler in list(self._handlers.get(type(event), [])):
+                try:
+                    await handler(event)
+                except Exception:
+                    logger.exception("Error in handler for %s", type(event).__name__)
 
     async def _recover(self) -> int:
         count = 0

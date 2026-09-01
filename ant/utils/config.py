@@ -411,6 +411,16 @@ class ObservabilityConfig(BaseModel):
 
     metrics_enabled: bool = True
     json_logs: bool = True
+    tracing_enabled: bool = True
+    """Phase 6: OpenTelemetry tracing。False = 无 provider（零开销 no-op）。
+    导出目标优先级：OTEL_EXPORTER_OTLP_ENDPOINT 环境变量（Jaeger/Tempo/
+    Collector）→ trace_to_file（本地 JSONL）→ trace_console；全部未配置
+    则保持 no-op（不刷控制台噪音）。"""
+    trace_to_file: bool = False
+    """span 树以 JSON Lines 落 <logging_path>/traces.jsonl（无外部依赖的
+    本地查询/演示路径）。"""
+    trace_console: bool = False
+    """显式开启时 span 打到控制台（开发调试用）。"""
 
 
 class Config(BaseModel):

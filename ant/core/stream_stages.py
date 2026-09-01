@@ -412,11 +412,23 @@ class StreamLLMCallStage(StreamPipelineStage):
                         "finish_reason": ctx.stop_reason,
                         "response_length": len(ctx.response_content),
                     })
+                    # Phase 6 tracing：LLM span 语义属性（trace.md §6——
+                    # model/tokens/finish_reason，不含任何内容）
+                    span.set_attribute("llm.finish_reason", ctx.stop_reason)
+                    span.set_attribute("llm.response_length", len(ctx.response_content))
 
             elif event_type == "usage":
                 # Token/cost accounting event (llm-layer 协议)：不转发给前端，
                 # 交给 ctx.usage_recorder（若已注入）。记账失败只 debug 日志，
                 # 绝不能打断流式输出。
+                # Phase 6 tracing：把 usage 写进 LLM span 属性（模型名/token
+                # 数/成本——metadata 而非内容，遵守脱敏纪律）。
+                if span:
+                    data = chunk["data"]
+                    span.set_attribute("llm.model", data.get("model", ""))
+                    span.set_attribute("llm.prompt_tokens", data.get("prompt_tokens", 0))
+                    span.set_attribute("llm.completion_tokens", data.get("completion_tokens", 0))
+                    span.set_attribute("llm.cost", data.get("cost", 0.0))
                 if ctx.usage_recorder is not None:
                     try:
                         await ctx.usage_recorder(chunk["data"])
@@ -554,6 +566,12 @@ class StreamToolExecutionStage(StreamPipelineStage):
                 tool_results[idx] = result
                 if tool_span:
                     tool_span.add_event("tool_result_length", {"length": len(result)})
+                    # Phase 6 tracing：工具 span 语义属性（trace.md §7——
+                    # 结果长度与超时状态；参数/结果内容绝不进属性）
+                    tool_span.set_attribute("tool.result_length", len(result))
+                    tool_span.set_attribute(
+                        "tool.status", "timeout" if "timed out" in result else "ok"
+                    )
                     _finish_span(tool_span, "ok")
 
                 # Truncate long results for display
@@ -570,6 +588,12 @@ class StreamToolExecutionStage(StreamPipelineStage):
                 tool_results[idx] = result
                 if tool_span:
                     tool_span.add_event("tool_result_length", {"length": len(result)})
+                    # Phase 6 tracing：工具 span 语义属性（trace.md §7——
+                    # 结果长度与超时状态；参数/结果内容绝不进属性）
+                    tool_span.set_attribute("tool.result_length", len(result))
+                    tool_span.set_attribute(
+                        "tool.status", "timeout" if "timed out" in result else "ok"
+                    )
                     _finish_span(tool_span, "ok")
 
                 # Truncate long results for display

@@ -172,6 +172,11 @@ class SharedContext:
         # 16 rag-memory
         self._init_memory(config)
 
+        # Phase 6: OpenTelemetry tracing 初始化（幂等；禁用时零开销）
+        from ant.observability import tracing
+
+        tracing.init_tracing(config)
+
     # ── Phase 1: event bus assembly ─────────────────────────────────────
 
     def _assemble_bus(self, config: Config) -> EventBusProtocol:
