@@ -446,6 +446,11 @@ class QdrantStore(VectorStore):
         """
         if not query_text.strip() or top_k <= 0:
             return []
+        if isinstance(where, dict):
+            # 统一入口：纯 dict 过滤（如 {"session_id": "lmeval-3"}）转成
+            # qdrant-client 的 Filter 模型——query_points 的 query_filter
+            # 不接 dict（Phase 7 修复，docstring 与行为对齐）。
+            where = self._build_filter(where)
         client = await self._client_async()
         dense = (await self._dense_vectors([query_text]))[0]
 
