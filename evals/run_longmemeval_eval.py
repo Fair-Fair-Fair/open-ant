@@ -383,7 +383,8 @@ async def _run_mode(args, mode: str) -> int:
     out_dir = Path(args.out_dir) / mode
     out_dir.mkdir(parents=True, exist_ok=True)
     hyp_path = out_dir / "hypotheses.jsonl"
-    done = load_done_ids(hyp_path)
+    # --resume 才续跑；全新运行覆盖旧 hypotheses（与集合重建语义一致）
+    done = load_done_ids(hyp_path) if args.resume else set()
     todo = [inst for inst in instances if inst["question_id"] not in done]
     logger.info(
         "mode=%s: %d 题（全量 %d），跳过已完成 %d，剩余 %d",
@@ -418,7 +419,7 @@ async def _run_mode(args, mode: str) -> int:
         await ctx.vector_store._client_async()
 
     sem = asyncio.Semaphore(args.concurrency)
-    out_file = open(hyp_path, "a", encoding="utf-8")
+    out_file = open(hyp_path, "a" if args.resume else "w", encoding="utf-8")
     stats = {"memories": 0, "chunks": 0}
 
     async def _one(idx: int, inst: dict):
