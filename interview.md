@@ -7,7 +7,7 @@
 
 # Project
 
-> 阅读约定：每个流程图的节点都可定位到代码——统一使用 `文件路径.类名.方法名` 记法（如 `bus/outbox.py::OutboxPublisher.run`），§1-§9 每节开头附「组件定位」清单。
+> 阅读约定：每个流程图的节点都可定位到代码——统一使用 `文件路径.类名.方法名` 记法（如 `bus/outbox.py::OutboxPublisher.run`），§1-§10 每节开头附「组件定位」清单。
 
 ## 0. 系统全景
 
@@ -222,6 +222,77 @@ config.user.yaml（workspace 级：后端开关/模型/护栏/记忆参数）
 | Neo4j | 记忆图（冲突检测/SUPERSEDES/软归档） | `memory/graph.py::MemoryGraph.detect_conflicts / expand / archive_stale` |
 | litellm Router | LLM 重试/超时/降级/成本 | `provider/llm/base.py::LLMProvider.chat / stream_chat` |
 
+## 10. Trace 流转（OTel 埋点 → 传播 → 导出）
+
+> 组件定位：`observability/tracing.py::init_tracing / inject_current_traceparent / start_consume_span / FileSpanExporter`、`core/tracer.py::ExecutionTracer.start_trace / Trace.start_span`、`core/stream_stages.py::_start_span / StreamLLMCallStage / StreamToolExecutionStage`、`bus/composite.py::CompositeBus.publish`、`bus/rabbitmq.py::RabbitMqBus._on_message`、`bus/memory.py::InMemoryBus._notify`、`core/events.py::Event.traceparent`
+
+```
+一次用户消息 = 一条 Trace
+  ├─ 根 span：core/tracer.py::ExecutionTracer.start_trace → "agent.run"（属性 session.id）
+  ├─ 阶段 span：core/stream_stages.py::_start_span（9 阶段各一个）
+  │    ValidationStage / InputGuardStage / ObservabilityStage / ContextBuildStage /
+  │    ContextGuardStage / LLMCallStage / ToolExecutionStage / OutputGuardStage / TerminalStage
+  │    ├─ LLMCallStage：事件 first_token(ttft_ms) / tool_calls_requested / llm_error
+  │    │   属性 llm.model / llm.prompt_tokens / llm.completion_tokens / llm.cost /
+  │    │        llm.finish_reason / llm.response_length
+  │    └─ ToolExecutionStage：子 span "ToolExecution:{name}"
+  │        属性 tool.result_length / tool.status（超时置 error）
+  ├─ 发布事件：bus/composite.py::CompositeBus.publish
+  │    tracing.inject_current_traceparent → event.traceparent = "00-<32hex>-<16hex>-01"
+  │    （W3C 格式随事件 JSON 序列化，经 RabbitMQ 载荷跨进程传递）
+  └─ 消费事件：bus/rabbitmq.py::RabbitMqBus._on_message（memory.py::_notify 同构）
+       tracing.start_consume_span(extract traceparent) → otel_trace.use_span 包裹全部 handler
+       → 消费线程内 contextvars 重连 → 子 Agent 的 agent.run 及以下 span 自动续接同一条 Trace
+
+导出三态（observability/tracing.py::init_tracing，幂等初始化）：
+  OTEL_EXPORTER_OTLP_ENDPOINT → OTLP 批量导出（对接 Jaeger / Tempo / Collector）
+  observability.trace_to_file   → FileSpanExporter 落 .logs/traces.jsonl（每行一个 span）
+  observability.trace_console   → 控制台（开发调试）
+  全部未配置 → no-op（零开销，test_tracing.py 断言过）
+```
+
+**设计要点**：① 与成本账本分工——`provider/llm/usage.py::UsageRecorder` 落 `usage_records` 表回答"每笔花了多少 token/钱"（可聚合出账单）；Trace 回答"这次请求去了哪、慢在哪"。两者交叉不重复，被问 trace 时只答成本埋点等于只说了一半；② 传播纪律——contextvars/ThreadLocal 过不了异步消息边界，所以 Trace Context **显式进事件载荷**，消费端 extract 重建父链；③ 脱敏纪律——span 属性只放 metadata（长度/计数/模型名/状态），prompt/参数/工具结果内容绝不进 span（`tests/test_tracing.py::test_no_content_leaks_into_span_attributes`）。
+
+### 示例：最终 Trace 长什么样
+
+主 Agent 收到"查一下 X 并写进笔记"，其中调用子代理做检索。在 Jaeger/Tempo UI 里看到的树（时间即瓶颈，一眼定位慢在哪）：
+
+```text
+Trace 5f8b2c1d…9e6f   总耗时 9.8s   ← 一条用户消息 = 一条 Trace
+└─ agent.run 9.8s                    [session.id=cli-8f3a]
+   ├─ ValidationStage 0.2ms
+   ├─ InputGuardStage 3.1ms
+   ├─ ObservabilityStage 1.0ms
+   ├─ ContextBuildStage 45ms
+   ├─ ContextGuardStage 12ms
+   ├─ LLMCallStage 2.4s              [llm.model=deepseek-chat  llm.prompt_tokens=3200
+   │                                  llm.completion_tokens=180  llm.finish_reason=tool_calls
+   │                                  llm.cost=0.0041]
+   │   └─ 事件 first_token: ttft_ms=680
+   ├─ ToolExecutionStage 6.9s
+   │  └─ ToolExecution:dispatch_subagent 6.8s
+   │     └─ agent.event.consume 6.7s [event.type=DispatchEvent, bus=rabbitmq]  ← 跨总线续链点
+   │        └─ agent.run 6.5s        [session.id=sub-2c91]   ← 子代理自己的根
+   │           ├─ ContextBuildStage 40ms
+   │           ├─ LLMCallStage 1.9s  [llm.finish_reason=tool_calls]
+   │           ├─ ToolExecution:web_search 3.1s [tool.result_length=2840, tool.status=ok]
+   │           └─ LLMCallStage 2.0s  [llm.finish_reason=stop]
+   ├─ LLMCallStage 0.9s              [llm.finish_reason=stop]   ← 汇总子代理结果后的最终回复
+   └─ TerminalStage 3ms
+```
+
+同一条 Trace 落盘后（`trace_to_file` → `.logs/traces.jsonl`，每行一个 span）——注意 5 行的 `trace_id` 完全相同，第 3 行的 `parent_id` 指向的是**另一个消费任务里**发布事件的 span，这条跨 RabbitMQ 的边就是事件载荷里的 traceparent 重建出来的：
+
+```json
+{"trace_id":"5f8b2c1d9a4e7b3f6c0d1a2b3c4d5e6f","span_id":"a1b2c3d4e5f60718","parent_id":null,"name":"agent.run","attributes":{"session.id":"cli-8f3a"},"status":"OK","start_ms":1756756800000,"end_ms":1756756809800}
+{"trace_id":"5f8b2c1d9a4e7b3f6c0d1a2b3c4d5e6f","span_id":"d1e2f3a4b5c60713","parent_id":"a1b2c3d4e5f60718","name":"ToolExecution:dispatch_subagent","attributes":{"tool.status":"ok"},"status":"OK","start_ms":1756756802600,"end_ms":1756756809400}
+{"trace_id":"5f8b2c1d9a4e7b3f6c0d1a2b3c4d5e6f","span_id":"c1d2e3f4a5b60710","parent_id":"d1e2f3a4b5c60713","name":"agent.event.consume","attributes":{"event.type":"DispatchEvent","bus":"rabbitmq"},"status":"OK","start_ms":1756756803100,"end_ms":1756756809800}
+{"trace_id":"5f8b2c1d9a4e7b3f6c0d1a2b3c4d5e6f","span_id":"d1e2f3a4b5c60711","parent_id":"c1d2e3f4a5b60710","name":"agent.run","attributes":{"session.id":"sub-2c91"},"status":"OK","start_ms":1756756803200,"end_ms":1756756809700}
+{"trace_id":"5f8b2c1d9a4e7b3f6c0d1a2b3c4d5e6f","span_id":"e1f2a3b4c5d60712","parent_id":"d1e2f3a4b5c60711","name":"LLMCallStage","attributes":{"llm.model":"deepseek-chat","llm.prompt_tokens":2100,"llm.completion_tokens":150,"llm.finish_reason":"stop","llm.cost":0.0028},"status":"OK","start_ms":1756756805600,"end_ms":1756756809600}
+```
+
+查询：`grep <trace_id> .logs/traces.jsonl` 或 `jq -s 'group_by(.trace_id)' .logs/traces.jsonl` 即可还原整条链（Jaeger 里直接看树）。
+
 ---
 
 # Interview
@@ -262,8 +333,8 @@ config.user.yaml（workspace 级：后端开关/模型/护栏/记忆参数）
 
 ### 6. Agent 系统核心模块与职责？
 
-- 管线层（校验/护栏/上下文构建/守卫/LLM 调用/工具执行/输出护栏/终结）、记忆层（短期=会话+ContextGuard；长期=Qdrant+Neo4j）、工具层（schema 校验/沙箱/治理/审计）、通道层（四平台统一事件）、观测层（metrics/探活/埋点）。
-- 每个模块都有独立文件与测试映射（422 用例）。
+- 管线层（校验/护栏/上下文构建/守卫/LLM 调用/工具执行/输出护栏/终结）、记忆层（短期=会话+ContextGuard；长期=Qdrant+Neo4j）、工具层（schema 校验/沙箱/治理/审计）、通道层（四平台统一事件）、观测层（metrics/探活/埋点/OTel 链路追踪）。
+- 每个模块都有独立文件与测试映射（431 用例）。
 
 ### 7. 短期记忆 vs 长期记忆及实现方式？
 
@@ -309,7 +380,7 @@ config.user.yaml（workspace 级：后端开关/模型/护栏/记忆参数）
 ### 14. 你的产品看起来像一个小 Agent，你认为是吗？
 
 - **承认定位**：是"个人助手级运行时"，不是平台级产品——功能面（四通道/工具数）确实小。
-- **但工程深度是生产级**：五组件基础设施集成验证、422 测试、三套 eval、at-least-once 消息语义、密钥门禁。小不等于玩具；玩具的判据是"能不能经受故障与追问"，本项目每一层都有测试与真实集成兜底。
+- **但工程深度是生产级**：五组件基础设施集成验证、431 测试、三套 eval、at-least-once 消息语义、密钥门禁。小不等于玩具；玩具的判据是"能不能经受故障与追问"，本项目每一层都有测试与真实集成兜底。
 - 对比 Claude Code/OpenClaw：能力覆盖更窄，但可靠性工程链路完整可讲。
 
 ### 15. Agent 怎么判断任务执行完而不死循环？底层逻辑？
@@ -346,7 +417,7 @@ config.user.yaml（workspace 级：后端开关/模型/护栏/记忆参数）
 
 - **选型边界**：LLM 接入用 litellm Router（LangChain 同源），但编排自研——LangGraph 是图编排抽象，本项目是**运行时**（事件总线+管线+治理），两者解决的问题不同：图编排解决"流程怎么走"，运行时解决"流程之外发生什么"（崩溃、重试、审计、隔离）。
 - **自研的理由**：at-least-once 消息语义/幂等/DLQ、图记忆冲突仲裁，框架生态没有现成；学习与控制链路。
-- **兜底**：422 测试 + eval 证明自研部分的质量；该用成熟件的（解析、消息、向量库）全部用成熟件——"自研的是语义，不是轮子"。
+- **兜底**：431 测试 + eval 证明自研部分的质量；该用成熟件的（解析、消息、向量库）全部用成熟件——"自研的是语义，不是轮子"。
 
 ### 21. Agent 框架中规划、执行、工具、模型如何分层？
 
@@ -361,6 +432,13 @@ config.user.yaml（workspace 级：后端开关/模型/护栏/记忆参数）
 - **不重复**：processed_messages 表（message_id 唯一键）——消费前查、处理成功插入；重复投递直接跳过并 ack。集成测试：真实 broker 重复投递同 message_id → 只处理一次。
 - **不遗漏**：outbox 同事务（发出即落库）+ publisher confirm + 失败进 DLX/DLQ（永不静默丢弃）+ DLQ 可人工补偿。
 - **单进程级联**：子代理任务按 parent_session_id 注册，父任务取消级联取消子任务（跨进程取消是明确边界，如实说明）。
+
+### 23. Trace 怎么做？（跨 Agent 链路追踪）
+
+- **别只答成本埋点**：`UsageRecorder`（`provider/llm/usage.py`，落 `usage_records` 表）是成本**账本**（每笔 token/钱，可聚合成账单）；完整答案 = 成本账本 + 过程追踪。一条用户消息 = 一条 Trace：根 span `agent.run`，管线 9 阶段 / LLM / 工具 / 事件 publish·consume 都是 span（完整流转见 Project §10）。
+- **最有价值的点（跨总线续链）**：Main→SubAgent 经 RabbitMQ 异步通信，contextvars/ThreadLocal 在消息边界断链——所以 publish 时 `inject_current_traceparent` 把 W3C traceparent 注入事件载荷（`core/events.py::Event.traceparent` 随 JSON 序列化跨进程），consume 时 `start_consume_span` extract 出父链并用 `use_span` 包裹 handler，子代理整棵子树自动续接同一条 Trace。端到端断言：`tests/test_tracing.py::test_composite_bus_injects_traceparent_and_handler_runs_under_consume`。
+- **标准与工程**：OpenTelemetry SDK；导出三态（OTLP→Jaeger/Tempo/Collector、trace_to_file→JSONL、console，未配置 no-op 零开销）；span 属性 metadata-only（模型/token/耗时/长度/状态，prompt 与工具 payload 脱敏不落）；查询 = grep trace_id 或 Jaeger 树（示例见 Project §10）。
+- 可追问落点：`observability/tracing.py::start_consume_span` 的 parent context 重建；`stream_stages.py::StreamLLMCallStage` 的属性集合与 first_token 事件；为什么 Span 属性只放 metadata（隐私 + 存储成本）。
 
 ---
 
