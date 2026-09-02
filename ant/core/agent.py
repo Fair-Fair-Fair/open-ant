@@ -577,6 +577,7 @@ class AgentSession:
                             document=mem["content"],
                             metadata=new_meta,
                         )
+                        await self._ingest_memory_to_graph(mem, target_id, new_meta)
                         logger.debug(f"Updated memory {target_id}: {mem['content']}")
                     else:
                         logger.warning(f"Target memory {target_id} not found, creating new instead")
@@ -594,9 +595,14 @@ class AgentSession:
                             metadatas=[new_meta],
                             ids=[target_id]  # 使用原ID
                         )
+                        await self._ingest_memory_to_graph(mem, target_id, new_meta)
                         logger.info(f"✨ Created memory (fallback) {target_id}: {mem['content']}")  # 新增日志  # noqa: E501
                 else:
                     # 普通创建
+                    # Phase 7 修复：显式传 ids=[memory_id]，保证 Qdrant 点 id 与
+                    # 图节点 memory_id 一致——graph.expand 靠 memory id 在两者间
+                    # 对齐，此前不传 id 时两者对不上、子图扩展永远为空。
+                    memory_id = mem.get("memory_id") or uuid.uuid4().hex
                     new_meta = {
                         "category": mem.get("category", "fact"),
                         "importance": mem.get("importance", 5),
@@ -608,13 +614,46 @@ class AgentSession:
                     await vector_store.add(
                         documents=[mem["content"]],
                         metadatas=[new_meta],
+                        ids=[memory_id],
                     )
+                    await self._ingest_memory_to_graph(mem, memory_id, new_meta)
                     logger.info(f"✨ Created new memory: {mem['content']}")  # 新增日志
 
             logger.info(f"Processed {len(memories)} memories from session {self.session_id}")
             self.state._last_extracted_idx = len(self.state.messages)
         except Exception as e:
             logger.warning(f"Memory extraction failed: {e}", exc_info=True)
+
+    async def _ingest_memory_to_graph(
+        self,
+        mem: dict,
+        memory_id: str,
+        meta: dict,
+    ) -> None:
+        """同步记忆到 Neo4j 记忆图（Phase 7 修复）。
+
+        MERGE :Memory 节点 + 实体 + MENTIONED_IN 边，使
+        detect_conflicts / mark_superseded / expand 真正有数据可用。
+        图失败只降级（设计原则 11）：图是可选增强，绝不阻塞向量入库。
+        """
+        logger = logging.getLogger(__name__)
+        graph = getattr(self.shared_context, "graph", None)
+        if graph is None:
+            return
+        try:
+            await graph.ingest({
+                "memory_id": memory_id,
+                "content": mem["content"],
+                "category": meta.get("category", "fact"),
+                "importance": meta.get("importance", 5),
+                "created_at": meta.get("created_at"),
+                "updated_at": meta.get("updated_at"),
+                "source": "agent",
+                "session_id": meta.get("session_id", self.session_id),
+                "entities": mem.get("entities", []),
+            })
+        except Exception as exc:  # noqa: BLE001 — 图失败不阻塞记忆入库
+            logger.warning("Graph ingest failed (degraded to vector-only): %s", exc)
 
     async def _execute_tool_call(
         self,

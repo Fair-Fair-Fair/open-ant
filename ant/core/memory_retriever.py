@@ -11,7 +11,7 @@ warned about and the pipeline continues with what it already has.
 """
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ant.provider.memory.base import MemoryDocument
 
@@ -60,7 +60,10 @@ class MemoryRetriever:
         }
 
     async def retrieve(
-        self, query: str, top_k: int | None = None
+        self,
+        query: str,
+        top_k: int | None = None,
+        where: Any | None = None,
     ) -> list[MemoryDocument]:
         """Retrieve top-k most relevant memories for a query.
 
@@ -68,6 +71,11 @@ class MemoryRetriever:
         Chroma backend: the legacy hybrid path (fusion / threshold /
         diversity) is preserved unchanged.  Graph expansion and rerank are
         optional stages that degrade to no-ops on failure.
+
+        ``where``（Phase 7）is a payload filter passed through to the Qdrant
+        backend — used for per-user / per-tenant memory isolation (and by the
+        LongMemEval eval for per-instance isolation).  The legacy Chroma
+        backend has no filter support and ignores it with a warning.
         """
         if top_k is None:
             top_k = self.context.config.memory.top_k
@@ -80,7 +88,7 @@ class MemoryRetriever:
         if backend == "qdrant":
             try:
                 results = await vector_store.query(
-                    query, top_k=top_k, prefer_hybrid=True
+                    query, top_k=top_k, prefer_hybrid=True, where=where
                 )
             except Exception as exc:  # noqa: BLE001 — degrade, never break the chain
                 logger.warning(
@@ -88,6 +96,10 @@ class MemoryRetriever:
                 )
                 return []
         else:
+            if where is not None:
+                logger.warning(
+                    "vector_backend=chroma does not support where filters — ignored"
+                )
             results = await vector_store.query(query, top_k=top_k)
 
         results = await self._expand_with_graph(results)
@@ -109,10 +121,18 @@ class MemoryRetriever:
         return results
 
     async def retrieve_semantic(
-        self, query: str, top_k: int | None = None
+        self,
+        query: str,
+        top_k: int | None = None,
+        where: Any | None = None,
     ) -> list[MemoryDocument]:
         """Pure vector retrieval — used for memory dedup/merge decisions
-        where semantic similarity (not keyword overlap) is the signal."""
+        where semantic similarity (not keyword overlap) is the signal.
+
+        ``where``（Phase 7）is the same payload filter as ``retrieve`` —
+        dedup must be scoped to the same tenant as the write, otherwise
+        cross-tenant memories would be falsely dropped as duplicates.
+        """
         if top_k is None:
             top_k = self.context.config.memory.merge_top_k
 
@@ -122,7 +142,11 @@ class MemoryRetriever:
                 # Qdrant: pure dense (no RRF) — keyword overlap must not
                 # make two different facts look like the same memory.
                 return await vector_store.query(
-                    query, top_k=top_k, prefer_hybrid=False
+                    query, top_k=top_k, prefer_hybrid=False, where=where
+                )
+            if where is not None:
+                logger.warning(
+                    "vector_backend=chroma does not support where filters — ignored"
                 )
             if hasattr(vector_store, "semantic_query"):
                 return await vector_store.semantic_query(query, top_k=top_k)

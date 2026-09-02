@@ -10,7 +10,7 @@ conflict detection + LLM arbitration + SUPERSEDES edges).
 import json
 import logging
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from litellm.types.completion import ChatCompletionMessageParam as Message
 
@@ -97,6 +97,7 @@ class MemoryGuard:
     async def extract_memories(
             self,
             messages: list[Message],
+            where: Any | None = None,
     ) -> list[dict]:
         """Extract memorable facts from conversation messages.
 
@@ -105,6 +106,10 @@ class MemoryGuard:
         resolved via ``_resolve_memory`` — vector-store semantic dedup plus,
         when the memory graph is enabled, entity-level conflict arbitration.
         A failed extraction call degrades to ``[]`` (never raises).
+
+        ``where``（Phase 7）scopes the semantic-dedup query to a payload
+        filter (per-tenant memory isolation; the LongMemEval eval uses it
+        per benchmark instance).  ``None`` = no filter (production default).
         """
 
         try:
@@ -127,7 +132,7 @@ class MemoryGuard:
         resolved: list[dict] = []
 
         for candidate in candidates:
-            result = await self._resolve_memory(candidate)
+            result = await self._resolve_memory(candidate, where=where)
             if result is not None:
                 resolved.append(result)
 
@@ -238,6 +243,7 @@ class MemoryGuard:
     async def _resolve_memory(
             self,
             candidate: dict,
+            where: Any | None = None,
     ) -> dict | None:
         """
         Resolve a candidate memory.
@@ -265,6 +271,7 @@ class MemoryGuard:
         similar = await retriever.retrieve_semantic(
             candidate["content"],
             top_k=self.context.config.memory.merge_top_k,
+            where=where,
         )
 
         # 检查是否与文档片段重复
