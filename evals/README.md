@@ -9,6 +9,9 @@ src/evals/
 ├── dataset_retrieval.py    # 20 篇中文语料（doc_01..doc_20）+ 30 条标注查询（q_01..q_30）
 ├── dataset_memory_tasks.py # 10 个多轮记忆任务（陈述 → 干扰 → 追问）
 ├── run_retrieval_eval.py   # CLI：连 Qdrant 跑对照实验，产出 report_retrieval.md
+├── run_longmemeval_eval.py # Phase 7：LongMemEval 公开 benchmark（四模式消融）
+├── longmemeval_judge.py    #   ↑ 官方 judge 协议（prompt 逐字移植，MIT）
+├── cleanup_longmemeval_graph.py  #   ↑ graph-on 跑完清理评测命名空间节点
 └── README.md
 ```
 
@@ -112,3 +115,43 @@ chunk→source doc 去重（保留最优名次）再计分。
 - 记忆任务集：转为会话级自动化断言（完整 server + LLM），与 Agent 任务集、
   guardrail 评估并列三套 eval；
 - 全部依赖真实 embedding/rerank 的结论，以 3A/3C 合并后的自动切换为准。
+
+## Phase 7：LongMemEval 公开 benchmark（对外可对标数字）
+
+LongMemEval（ICLR 2025, [xiaowu0162/LongMemEval](https://github.com/xiaowu0162/LongMemEval)，MIT）：
+500 道 QA 考长期交互记忆，6 题型 + 30 道 abstention，每题自带 40+ 会话
+haystack（S 集 ~115k tokens/题）。与自建 30 查询/10 任务的区别：**数字可对外
+对标**（GPT-4o 官方基线 57.7%）。
+
+```bash
+# 数据（repo 外，一次性）：
+mkdir -p ../workspace/evals/longmemeval/LongMemEval/data && cd $_
+wget https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
+wget https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json
+
+# 四模式消融（同一套题，先便宜后贵）：
+python -m evals.run_longmemeval_eval --mode baseline --n 500   # 无记忆地板
+python -m evals.run_longmemeval_eval --mode oracle   --n 500   # evidence 注入上限
+python -m evals.run_longmemeval_eval --mode chunks   --n 500   # 纯 chunk 检索消融
+python -m evals.run_longmemeval_eval --mode memory   --n 500 --graph off  # 完整记忆管线
+
+# 官方 judge 协议评分（deepseek 默认；换更强模型复评可 --judge-model）：
+python -m evals.longmemeval_judge \
+    --hyp ../workspace/evals/longmemeval/out/memory/hypotheses.jsonl \
+    --ref ../workspace/evals/longmemeval/LongMemEval/data/longmemeval_s_cleaned.json
+
+# graph on 跑完后清理评测命名空间（源/实体名过滤，不碰用户数据）：
+python -m evals.cleanup_longmemeval_graph
+```
+
+隔离设计（不污染生产记忆）：专用 Qdrant 集合 `ant_memory_lmeval`
+（`QDRANT_COLLECTION` 覆盖 + 跑前重建）；每实例 payload
+`session_id=lmeval-<idx>` 作 where 过滤（复用已有 KEYWORD 索引，Phase 7 起
+`MemoryRetriever.retrieve(where=...)` / `MemoryGuard.extract_memories(where=...)`
+支持租户级隔离——这也是多用户绑定遗留项的落地）；graph-on 时实体名加
+`lmeval-<idx>::` 命名空间 + `source=longmemeval` 标记。
+
+诚实边界：① 提取 prompt 只取用户消息（生产策略）——single-session-assistant
+类证据在助手侧，预期显著偏低（`--extract-assistant` 可跑对照）；② 批量提取
+时间戳取批内最大会话日期；③ judge 默认用配置模型（官方用 gpt-4o，自评偏差
+披露于报告）。**报告在 `evals/report_longmemeval.md`（跑完 judge 后生成）。**

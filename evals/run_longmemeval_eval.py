@@ -222,7 +222,8 @@ async def _ingest_instance(
 ) -> int:
     """逐批提取（guard：约束 JSON + 语义去重 + 图仲裁）→ 向量 + 图双写。
 
-    Returns: 入库的记忆条数。
+    Returns: 入库的记忆条数。向量写入按批聚合（一次 add 调多条），
+    避免逐条 HTTP upsert（全量 500 实例 × 数十条记忆时这是主要耗时）。
     """
     guard = ctx.memory_guard
     vector_store = ctx.vector_store
@@ -238,10 +239,16 @@ async def _ingest_instance(
         messages = [m for sess in batch for m in _turn_messages(sess)]
         if not messages:
             continue
-        memories = await guard.extract_memories(messages, where=where)
+        memories = await guard.extract_memories(
+            messages, where=where, max_tokens=4000
+        )
         if not memories:
             continue
         ts = _batch_max_ts(batch_dates)
+        docs: list[str] = []
+        ids: list[str] = []
+        metas: list[dict] = []
+        graph_rows: list[dict] = []
         for mem in memories:
             memory_id = mem.get("memory_id") or hashlib.sha256(
                 mem["content"].encode("utf-8")
@@ -255,35 +262,38 @@ async def _ingest_instance(
                 "updated_at": ts,
                 "source": "longmemeval",
             }
-            await vector_store.add(
-                documents=[mem["content"]], metadatas=[meta], ids=[memory_id]
-            )
+            docs.append(mem["content"])
+            ids.append(memory_id)
+            metas.append(meta)
             if graph is not None:
                 # 实体名加实例前缀做命名空间隔离（共享 Neo4j 上的多用户互不串扰）
-                namespaced = [
-                    {"name": f"lmeval-{idx}::{e['name']}", "type": e.get("type", "fact")}
-                    for e in mem.get("entities", [])
-                    if e.get("name")
-                ]
-                try:
-                    await graph.ingest(
-                        {
-                            "memory_id": memory_id,
-                            "content": mem["content"],
-                            "category": meta["category"],
-                            "importance": meta["importance"],
-                            "created_at": ts,
-                            "updated_at": ts,
-                            "source": "longmemeval",
-                            "session_id": f"lmeval-{idx}",
-                            "entities": namespaced,
-                        }
-                    )
-                except Exception as exc:  # noqa: BLE001 — 图失败降级（原则 11）
-                    logger.warning(
-                        "lmeval graph ingest failed (degraded): %s", type(exc).__name__
-                    )
-            total += 1
+                graph_rows.append(
+                    {
+                        "memory_id": memory_id,
+                        "content": mem["content"],
+                        "category": meta["category"],
+                        "importance": meta["importance"],
+                        "created_at": ts,
+                        "updated_at": ts,
+                        "source": "longmemeval",
+                        "session_id": f"lmeval-{idx}",
+                        "entities": [
+                            {"name": f"lmeval-{idx}::{e['name']}",
+                             "type": e.get("type", "fact")}
+                            for e in mem.get("entities", [])
+                            if e.get("name")
+                        ],
+                    }
+                )
+        await vector_store.add(documents=docs, metadatas=metas, ids=ids)
+        for row in graph_rows:
+            try:
+                await graph.ingest(row)
+            except Exception as exc:  # noqa: BLE001 — 图失败降级（原则 11）
+                logger.warning(
+                    "lmeval graph ingest failed (degraded): %s", type(exc).__name__
+                )
+        total += len(docs)
     return total
 
 
@@ -301,9 +311,15 @@ async def _answer_memory(ctx, llm, inst: dict, idx: int) -> str:
 
 
 async def _index_chunks(ctx, inst: dict, idx: int) -> int:
-    """chunks 消融：会话原文切块直入向量库（不做 LLM 提取/仲裁）。"""
+    """chunks 消融：会话原文切块直入向量库（不做 LLM 提取/仲裁）。
+
+    按批聚合 add（每批 100 条）——全量 500 实例 ≈ 24.6 万 turn，
+    逐条 HTTP upsert 需要数小时，批量化后主要耗时只剩本地 embedding。
+    """
     vector_store = ctx.vector_store
-    total = 0
+    docs: list[str] = []
+    ids: list[str] = []
+    metas: list[dict] = []
     for sid, sess, date in zip(
         inst["haystack_session_ids"], inst["haystack_sessions"], inst["haystack_dates"]
     ):
@@ -312,26 +328,28 @@ async def _index_chunks(ctx, inst: dict, idx: int) -> int:
             content = (turn.get("content") or "").strip()
             if not content:
                 continue
-            chunk_id = hashlib.sha256(
-                f"{sid}:{content}".encode("utf-8")
-            ).hexdigest()[:24]
-            await vector_store.add(
-                documents=[content],
-                metadatas=[
-                    {
-                        "category": "chunk",
-                        "importance": 5,
-                        "keywords": "",
-                        "session_id": f"lmeval-{idx}",
-                        "created_at": ts,
-                        "updated_at": ts,
-                        "source": "longmemeval-chunk",
-                    }
-                ],
-                ids=[chunk_id],
+            docs.append(content)
+            ids.append(
+                hashlib.sha256(f"{sid}:{content}".encode("utf-8")).hexdigest()[:24]
             )
-            total += 1
-    return total
+            metas.append(
+                {
+                    "category": "chunk",
+                    "importance": 5,
+                    "keywords": "",
+                    "session_id": f"lmeval-{idx}",
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "source": "longmemeval-chunk",
+                }
+            )
+    for i in range(0, len(docs), 100):
+        await vector_store.add(
+            documents=docs[i : i + 100],
+            metadatas=metas[i : i + 100],
+            ids=ids[i : i + 100],
+        )
+    return len(docs)
 
 
 # ── 主流程 ──────────────────────────────────────────────────────────────────
@@ -420,7 +438,8 @@ async def _run_mode(args, mode: str) -> int:
 
     sem = asyncio.Semaphore(args.concurrency)
     out_file = open(hyp_path, "a" if args.resume else "w", encoding="utf-8")
-    stats = {"memories": 0, "chunks": 0}
+    write_lock = asyncio.Lock()
+    stats = {"memories": 0, "chunks": 0, "done": 0, "errors": 0}
 
     async def _one(idx: int, inst: dict):
         async with sem:
@@ -445,14 +464,27 @@ async def _run_mode(args, mode: str) -> int:
                     raise ValueError(f"unknown mode {mode!r}")
             except Exception as exc:  # noqa: BLE001 — 单题失败不连坐整批
                 logger.error("instance %s failed: %s", inst["question_id"], exc)
+                stats["errors"] += 1
                 hypothesis = ""
                 extra = f"ERROR: {type(exc).__name__}"
-            return {
+            entry = {
                 "question_id": inst["question_id"],
                 "hypothesis": hypothesis,
                 "mode": mode,
                 "detail": extra,
             }
+            # 逐实例落盘：中途中断可 --resume 续跑（长跑数小时的保障）
+            async with write_lock:
+                out_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                out_file.flush()
+            stats["done"] += 1
+            if stats["done"] % 25 == 0 or stats["done"] == len(todo):
+                logger.info(
+                    "progress: %d/%d 完成（记忆 %d / 块 %d / 错误 %d）",
+                    stats["done"], len(todo),
+                    stats["memories"], stats["chunks"], stats["errors"],
+                )
+            return entry
 
     results = []
     for coro in asyncio.as_completed(
@@ -460,13 +492,11 @@ async def _run_mode(args, mode: str) -> int:
     ):
         results.append(await coro)
 
-    for entry in results:
-        out_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    out_file.flush()
     out_file.close()
     logger.info(
-        "mode=%s 完成：写入 %d 条 → %s（记忆 %d / 块 %d）",
-        mode, len(results), hyp_path, stats["memories"], stats["chunks"],
+        "mode=%s 完成：写入 %d 条 → %s（记忆 %d / 块 %d / 错误 %d）",
+        mode, len(results), hyp_path,
+        stats["memories"], stats["chunks"], stats["errors"],
     )
     return 0
 
@@ -482,9 +512,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--graph", default="off", choices=["on", "off"],
                         help="memory 模式是否启用 Neo4j 图（仲裁+扩展）")
-    parser.add_argument("--batch-size", type=int, default=5,
+    parser.add_argument("--batch-size", type=int, default=12,
                         help="每批提取的会话数（时间戳取批内最大日期）")
-    parser.add_argument("--concurrency", type=int, default=6)
+    parser.add_argument("--concurrency", type=int, default=10)
     parser.add_argument("--extract-assistant", action="store_true",
                         help="对照实验：提取用户+助手消息（默认仅用户，生产口径）")
     parser.add_argument("--resume", action="store_true",

@@ -98,6 +98,7 @@ class MemoryGuard:
             self,
             messages: list[Message],
             where: Any | None = None,
+            max_tokens: int | None = None,
     ) -> list[dict]:
         """Extract memorable facts from conversation messages.
 
@@ -110,11 +111,13 @@ class MemoryGuard:
         ``where``（Phase 7）scopes the semantic-dedup query to a payload
         filter (per-tenant memory isolation; the LongMemEval eval uses it
         per benchmark instance).  ``None`` = no filter (production default).
+        ``max_tokens``（Phase 7）is the optional extraction output cap —
+        batch extraction of long histories needs it explicitly enlarged.
         """
 
         try:
             candidates = await _constrained_extract_memories(
-                self.llm, messages, self.context.config
+                self.llm, messages, self.context.config, max_tokens=max_tokens
             )
         except Exception as e:
             logger.warning("Memory extraction failed, returning []: %s", e)

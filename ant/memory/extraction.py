@@ -222,6 +222,7 @@ async def extract_memories(
     llm: "LLMProvider",
     messages: list[dict],
     config: Any,
+    max_tokens: int | None = None,
 ) -> list[dict]:
     """Extract memorable facts via constrained tool-call output.
 
@@ -230,6 +231,9 @@ async def extract_memories(
         messages: conversation messages (only user content is a source).
         config: full Config (or duck-typed object with
             ``.memory.min_importance``).
+        max_tokens: optional output cap for the extraction call.  Default
+            ``None`` = provider default（批量提取大输入时需要显式放开，
+            LongMemEval eval 传 4000，否则大批次事实会被截断丢数据）。
 
     Returns:
         Validated memory dicts:
@@ -247,10 +251,13 @@ async def extract_memories(
 
     # Constrained output + low temperature for deterministic schema output.
     # LLM failures intentionally propagate — memory_guard owns the fallback.
+    kwargs: dict[str, Any] = {"temperature": 0.2}
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
     _, tool_calls, _ = await llm.chat(
         extraction_messages,
         EXTRACT_TOOLS,
-        temperature=0.2,
+        **kwargs,
     )
 
     memories: list[dict] = []
