@@ -13,7 +13,8 @@ Its first application scenario is the **Memory Ark** — a cognitive-assistance 
 > 中文文档：[`README_zh.md`](./README_zh.md)。叙事与面试文档多为中文（`memory-ark.md` / `interview.md` / `eval.md`）。
 
 ---
-
+![](images/GraphMemory.png)
+![](images/CompanyDay.jpg)
 ## A Day on the Memory Ark
 
 ```text
