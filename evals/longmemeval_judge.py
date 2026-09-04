@@ -115,8 +115,12 @@ async def judge_one(llm, entry: dict, hypothesis: str) -> bool:
         hypothesis,
         abstention=entry["question_id"].endswith("_abs"),
     )
+    # 官方脚本用 max_tokens=10（gpt-4o 非推理模型）。本项目默认模型是
+    # 推理模型（deepseek-v4-flash）：10 token 预算会被隐藏 reasoning 吃光、
+    # content 恒为空 → 全判 False。256 让 reasoning + "yes/no" 都有空间
+    # （实测 reasoning ~210 token + 1-2 token 结论；chat() 只回传最终 content）。
     response, _, _ = await llm.chat(
-        [{"role": "user", "content": prompt}], [], temperature=0, max_tokens=10
+        [{"role": "user", "content": prompt}], [], temperature=0, max_tokens=256
     )
     return "yes" in (response or "").lower()
 
@@ -167,7 +171,11 @@ def main(argv: list[str] | None = None) -> int:
     from ant.provider.llm.base import LLMProvider
     from ant.utils.config import Config
 
-    ws = (Path(args.workspace) or Path(__file__).resolve().parents[2] / "workspace").resolve()
+    ws = (
+        Path(args.workspace)
+        if args.workspace
+        else (Path(__file__).resolve().parents[2] / "workspace")
+    ).resolve()
     config = Config.load(ws)
     if args.judge_model:
         config.llm.model = args.judge_model
