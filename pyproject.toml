@@ -75,7 +75,9 @@ include = [
     "/ant",
     "/pyproject.toml",
     "/LICENSE",
+    "/LICENSE-DOCS",
     "/README.md",
+    "/README_zh.md",
     "/open-ant.bat",
     "/open-ant",
 ]
