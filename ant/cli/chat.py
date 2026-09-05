@@ -1,12 +1,14 @@
 """Chat CLI command for interactive sessions with slash commands."""
 
 import asyncio
+import sys
 
 import typer
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 from rich.text import Text
 
+from ant.cli.voice import VoiceIO, speech_deps_available
 from ant.core.agent import Agent
 from ant.core.context import SharedContext
 from ant.core.events import CliEventSource, ConfirmationRequestEvent, InboundEvent, OutboundEvent
@@ -20,11 +22,20 @@ from ant.utils.logging import setup_logging
 class ChatLoop:
     """Interactive chat session with slash commands."""
 
-    def __init__(self, config: Config, agent_id: str | None = None):
+    def __init__(
+        self,
+        config: Config,
+        agent_id: str | None = None,
+        voice_mode: bool | None = None,
+    ):
         self.config = config
         self.console = Console()
         self.context = SharedContext(config=config, channels=[])
         self.config_reloader = ConfigReloader(config)
+        # True=语音 / False=文字 / None=启动时交互选择（对齐 OpenClaw talk
+        # mode 思路）；语音依赖缺失时自动降级文字并提示。
+        self.voice_mode = voice_mode
+        self.voice_io: VoiceIO | None = None
 
         self.workers: list[Worker] = [
             self.context.eventbus,
@@ -106,6 +117,35 @@ class ChatLoop:
         await self.response_queue.put(event)
         await self.context.eventbus.ack(event)
 
+    def _resolve_voice_mode(self) -> bool:
+        """确定本轮会话的输入模式（文字/语音）。
+
+        ``--voice`` / ``--text`` 显式指定时直接采用；都没给时交互询问
+        （非交互终端直接文字）。语音依赖缺失 → 降级文字 + 安装提示。
+        """
+        if self.voice_mode is False:
+            return False
+
+        want_voice = self.voice_mode is True
+        if self.voice_mode is None and sys.stdin.isatty():
+            choice = Prompt.ask(
+                "输入模式  [1] 文字  [2] 语音",
+                default="1",
+                console=self.console,
+            )
+            want_voice = choice.strip() in ("2", "语音", "voice", "v")
+
+        if want_voice and speech_deps_available():
+            self.voice_io = VoiceIO()
+            return True
+
+        if want_voice:
+            self.console.print(
+                "[yellow]⚠ 语音依赖未安装，已降级为文字模式。安装：[/yellow] "
+                "[dim]pip install sounddevice edge-tts faster-whisper miniaudio[/dim]"
+            )
+        return False
+
     def get_user_input(self) -> str:
         """Get user input with styled prompt."""
         prompt_text = Text("You", style="cyan")
@@ -141,7 +181,15 @@ class ChatLoop:
             )
         for warning in self.context.sandbox.command.startup_warnings():
             self.console.print(f"\n[yellow]⚠ {warning}[/yellow]\n")
-        self.console.print("Type 'quit' or 'exit' to end.\n")
+
+        voice_on = self._resolve_voice_mode()
+        if voice_on:
+            self.console.print(
+                "[bold cyan]🎙 语音模式[/bold cyan][dim]：回车开始说话（6 秒自动停止），"
+                "说\"再见\"退出；语音失败自动降级文字。[/dim]\n"
+            )
+        else:
+            self.console.print("Type 'quit' or 'exit' to end.\n")
 
         self.config_reloader.start()
 
@@ -154,9 +202,24 @@ class ChatLoop:
 
         try:
             while True:
-                user_input = await asyncio.to_thread(self.get_user_input)
+                if voice_on and self.voice_io is not None:
+                    # 语音输入：回车录音 → ASR 转写（失败静默降级为再试一轮）
+                    user_input = await self.voice_io.listen()
+                    if not user_input:
+                        self.console.print("[dim]没有听清，请再说一遍。[/dim]")
+                        continue
+                    self.console.print(Text(f"你: {user_input}", style="cyan"))
+                else:
+                    user_input = await asyncio.to_thread(self.get_user_input)
 
-                if user_input.lower() in ("quit", "exit", "q"):
+                if user_input.lower() in ("quit", "exit", "q") or (
+                    voice_on and "再见" in user_input
+                ):
+                    if voice_on and self.voice_io is not None:
+                        try:
+                            await self.voice_io.speak("再见，我在这儿，会替您记着的。")
+                        except Exception:
+                            pass
                     self.console.print("\n[bold yellow]Goodbye![/bold yellow]")
                     break
 
@@ -171,17 +234,13 @@ class ChatLoop:
                 await self.context.eventbus.publish(event)
 
                 try:
-                    # cmd_response = await self.context.command_registry.dispatch(
-                    #     user_input, self.session
-                    # )
-                    # if cmd_response is not None:
-                    #     self.console.print(cmd_response)
-                    #     continue
                     response = await asyncio.wait_for(
                         self.response_queue.get(),
                         timeout=60.0
                     )
                     self.display_agent_response(response.content)
+                    if voice_on and self.voice_io is not None:
+                        await self.voice_io.speak(response.content)
                 except Exception as e:
                     self.console.print(f"\n[bold red]Error:[/bold red] {e}\n")
                     self.console.print(
@@ -196,10 +255,14 @@ class ChatLoop:
             self.config_reloader.stop()
 
 
-def chat_command(ctx: typer.Context, agent_id: str | None = None) -> None:
+def chat_command(
+    ctx: typer.Context,
+    agent_id: str | None = None,
+    voice_mode: bool | None = None,
+) -> None:
     """Start interactive chat session."""
     config = ctx.obj.get("config")
     setup_logging(config, console_output=False)
 
-    chat_loop = ChatLoop(config, agent_id=agent_id)
+    chat_loop = ChatLoop(config, agent_id=agent_id, voice_mode=voice_mode)
     asyncio.run(chat_loop.run())

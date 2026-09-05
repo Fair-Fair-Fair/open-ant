@@ -116,11 +116,33 @@ def chat(
             help="Agent ID to use (overrides default_agent from config)",
         ),
     ] = None,
+    voice: Annotated[
+        bool,
+        typer.Option(
+            "--voice",
+            help="语音输入模式：回车录音 → 转写 → 语音回答（依赖缺失时降级文字）",
+        ),
+    ] = False,
+    text: Annotated[
+        bool,
+        typer.Option(
+            "--text",
+            help="纯文字输入模式（跳过启动时的模式选择）",
+        ),
+    ] = False,
     workspace: Annotated[str | None, workspace_option("Path to workspace directory")] = None,
 ) -> None:
-    """Start interactive chat session."""
+    """Start interactive chat session.
+
+    不带 --voice/--text 时，交互终端启动时询问输入模式（文字/语音）。
+    """
     load_config(ctx)
-    chat_command(ctx, agent_id=agent)
+    voice_mode: bool | None = None
+    if voice:
+        voice_mode = True
+    elif text:
+        voice_mode = False
+    chat_command(ctx, agent_id=agent, voice_mode=voice_mode)
 
 
 @app.command("server")

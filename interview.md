@@ -1,4 +1,4 @@
-# Open-Ant 架构与面试题集
+# OpenAnt-MemoryArk 架构与面试题集
 
 > 本文档分两部分：**Project** —— 系统各关键流程在项目内的完整流转路径（架构图 / Agent Loop / LLM Loop / 组件设计 / 技术栈作用 / 配置流转），供阅读者快速熟悉仓库；**Interview** —— 面试题与基于真实实现的回答大纲，供作者自测与复盘。
 > 所有流程均可在代码中定位：仓库根为 `src/`，包在 `ant/` 下；数字与结论均可复现（见 README「测试与评测」）。
@@ -295,6 +295,28 @@ Trace 5f8b2c1d…9e6f   总耗时 9.8s   ← 一条用户消息 = 一条 Trace
 
 ---
 
+## 11. 记忆方舟场景（认知辅助概念验证 + 语音交互）
+
+> 场景叙事的完整设计在 `memory-ark.md`；愿景问答在 `value.md`；演示资产在
+> `workspace/evals/memoryark/`（仓库外）。
+
+### 场景：阿尔茨海默病认知辅助（"记忆方舟"）
+
+- **一句话**："当人的大脑开始遗忘这个世界的时候，世界不要因此把这个人也遗忘掉"——AI 不能治愈 AD，但可以成为**外部记忆系统**：替老人保管人物关系/人生事件/生活习惯，困惑时温柔重锚定现实（"我是小安，不是您的女儿。您的女儿叫 Emily"），记忆异常时给家人发信号。
+- **架构映射**（90% 已有）：人生档案 = Neo4j 记忆图 + hybrid 检索；温柔重锚定 = AGENT.md/SOUL.md persona + 检索注入；主动提醒 = cron；高风险确认 = HITL；承认不知道 = abstention 纪律（LongMemEval 验证过）。
+- **三条伦理红线**（写成 persona 纪律 + 探针）：永不扮演真人亲属 / 永不提供医疗用药建议 / 高风险行动必须家人确认。演示 9/9 通过（6 问答含 knowledge-update 仲裁 + 3 红线）。
+- **诚实边界**：概念验证——虚构 persona、无真实患者数据、非医疗产品。
+
+### 语音交互流（终端 talk mode）
+
+- **形态**：`open-ant chat` 启动时选择文字/语音（`--voice` / `--text` 显式指定，否则交互询问；对齐 OpenClaw talk mode 思路）。语音 = 又一个输入输出形态，底层同一条 harness 管线（流式 token 仍走进程内 pipeline）。
+- **链路**：回车录音 6s（sounddevice 16kHz）→ faster-whisper small 转写 → InboundEvent → 管线 → OutboundEvent → 终端显示 + edge-tts 合成播放；任何一步失败降级纯文字（设计原则 11）。
+- **选型**：faster-whisper（ctranslate2 CPU，免 torchaudio——本机 torch 2.12 无 torchaudio 故弃 funasr）+ edge-tts（免费、无 key、中文自然音色）+ miniaudio；无麦克风可用 `voice_demo.py --loopback` 自测全链。
+- **踩坑**：faster-whisper 把 numpy 数组一律按 16kHz 解释、不接收采样率参数——edge-tts 的 24kHz mp3 直喂 → 语速错乱、转写全幻觉（"我女儿叫什么名字"→"永遠都受傷了"），scipy resample_poly 到 16k 修复。
+- **诚实边界**：当前是 CLI demo 级；VoiceChannel 生产化（进 ChannelWorker）是 roadmap。
+
+---
+
 # Interview
 
 > 每题给出基于**真实实现**的回答大纲（含可追问的落点）。诚实优先：没做/有边界的地方明确说，并给出改进方向——这比硬答更有说服力。
@@ -334,7 +356,7 @@ Trace 5f8b2c1d…9e6f   总耗时 9.8s   ← 一条用户消息 = 一条 Trace
 ### 6. Agent 系统核心模块与职责？
 
 - 管线层（校验/护栏/上下文构建/守卫/LLM 调用/工具执行/输出护栏/终结）、记忆层（短期=会话+ContextGuard；长期=Qdrant+Neo4j）、工具层（schema 校验/沙箱/治理/审计）、通道层（四平台统一事件）、观测层（metrics/探活/埋点/OTel 链路追踪）。
-- 每个模块都有独立文件与测试映射（431 用例）。
+- 每个模块都有独立文件与测试映射（462 用例）。
 
 ### 7. 短期记忆 vs 长期记忆及实现方式？
 
@@ -380,7 +402,7 @@ Trace 5f8b2c1d…9e6f   总耗时 9.8s   ← 一条用户消息 = 一条 Trace
 ### 14. 你的产品看起来像一个小 Agent，你认为是吗？
 
 - **承认定位**：是"个人助手级运行时"，不是平台级产品——功能面（四通道/工具数）确实小。
-- **但工程深度是生产级**：五组件基础设施集成验证、431 测试、三套 eval、at-least-once 消息语义、密钥门禁。小不等于玩具；玩具的判据是"能不能经受故障与追问"，本项目每一层都有测试与真实集成兜底。
+- **但工程深度是生产级**：五组件基础设施集成验证、462 测试、三套 eval、at-least-once 消息语义、密钥门禁。小不等于玩具；玩具的判据是"能不能经受故障与追问"，本项目每一层都有测试与真实集成兜底。
 - 对比 Claude Code/OpenClaw：能力覆盖更窄，但可靠性工程链路完整可讲。
 
 ### 15. Agent 怎么判断任务执行完而不死循环？底层逻辑？
@@ -417,7 +439,7 @@ Trace 5f8b2c1d…9e6f   总耗时 9.8s   ← 一条用户消息 = 一条 Trace
 
 - **选型边界**：LLM 接入用 litellm Router（LangChain 同源），但编排自研——LangGraph 是图编排抽象，本项目是**运行时**（事件总线+管线+治理），两者解决的问题不同：图编排解决"流程怎么走"，运行时解决"流程之外发生什么"（崩溃、重试、审计、隔离）。
 - **自研的理由**：at-least-once 消息语义/幂等/DLQ、图记忆冲突仲裁，框架生态没有现成；学习与控制链路。
-- **兜底**：431 测试 + eval 证明自研部分的质量；该用成熟件的（解析、消息、向量库）全部用成熟件——"自研的是语义，不是轮子"。
+- **兜底**：462 测试 + eval 证明自研部分的质量；该用成熟件的（解析、消息、向量库）全部用成熟件——"自研的是语义，不是轮子"。
 
 ### 21. Agent 框架中规划、执行、工具、模型如何分层？
 
@@ -439,6 +461,26 @@ Trace 5f8b2c1d…9e6f   总耗时 9.8s   ← 一条用户消息 = 一条 Trace
 - **最有价值的点（跨总线续链）**：Main→SubAgent 经 RabbitMQ 异步通信，contextvars/ThreadLocal 在消息边界断链——所以 publish 时 `inject_current_traceparent` 把 W3C traceparent 注入事件载荷（`core/events.py::Event.traceparent` 随 JSON 序列化跨进程），consume 时 `start_consume_span` extract 出父链并用 `use_span` 包裹 handler，子代理整棵子树自动续接同一条 Trace。端到端断言：`tests/test_tracing.py::test_composite_bus_injects_traceparent_and_handler_runs_under_consume`。
 - **标准与工程**：OpenTelemetry SDK；导出三态（OTLP→Jaeger/Tempo/Collector、trace_to_file→JSONL、console，未配置 no-op 零开销）；span 属性 metadata-only（模型/token/耗时/长度/状态，prompt 与工具 payload 脱敏不落）；查询 = grep trace_id 或 Jaeger 树（示例见 Project §10）。
 - 可追问落点：`observability/tracing.py::start_consume_span` 的 parent context 重建；`stream_stages.py::StreamLLMCallStage` 的属性集合与 first_token 事件；为什么 Span 属性只放 metadata（隐私 + 存储成本）。
+
+### 24. 你的项目解决什么问题？（2026 秋招高频第一问）
+
+- **30 秒版（背）**："我的项目是一个 24/7 常驻的个人 AI 助手运行时。2026 年 always-on agent 成为行业公认品类（OpenClaw 引爆，Gemini Spark、微软 Scout 跟进），但这类系统要把电脑和账号权限交给模型——安全厂商公开警告（CVE-2026-25253 网关劫持 8.8 分、恶意 skill 市场、prompt injection 删邮件事故）。我的项目回答这个品类的**信任问题**：消息不丢（RabbitMQ DLX 五级重试 + outbox + 幂等）、权限可控（三层沙箱/HITL/审计）、记忆可仲裁（Neo4j 冲突检测 + LongMemEval 评测）、全链路可观测（OTel/Prometheus），462 个自动化测试 + CI，已发布 PyPI。"
+- **场景升华**：第一个应用场景是记忆方舟（AD 认知辅助概念验证，见 Project §11）——不是"造轮子"，是技术恰好能承载一个真正重要的场景。
+- **数字化证据链**：LongMemEval（ICLR 2025，500 题官方 judge 协议）baseline 6.0% / oracle 62.6%，memory 管线数字落在区间内（`eval.md` §3.3 恢复命令）；检索 recall@5=0.983；护栏 85%/FP 0%。
+- 可追问落点：`eval.md`（三层评估体系）、`memory-ark.md`（场景映射表）、README 的"为什么是 OpenAnt"章节。
+
+### 25. 语音交互怎么做？（终端语音模式）
+
+- 见 Project §11 语音交互流——核心一句话：**语音是 channel 形态的输入输出，底层同一条 harness 管线**，所以不需要"语音版 agent"，只需要输入输出的换装。
+- 选型逻辑（面试官爱听的 trade-off）：ASR 弃 funasr 用 faster-whisper（本机 torch 2.12 CPU 无 torchaudio，依赖链要轻）；TTS 用 edge-tts（免费无 key vs 云厂商付费实时 API）；本地推理 vs 云端 API 的取舍、延迟换自托管。
+- 诚实：CLI demo 级，ChannelWorker 生产化是 roadmap；无麦克风用 loopback 自测全链（TTS 合成问题→ASR 转回→agent→TTS）。
+
+### 26. 评测/决策调用踩过什么坑？（推理模型的隐藏成本）
+
+- **坑 1（judge 全判 False）**：官方 judge 协议 max_tokens=10（gpt-4o 非推理够用），deepseek-v4-flash 是推理模型——10 token 被隐藏 reasoning 吃光（实测 212）、content 恒空 → 500 题全判 False（0.0000%）。改 256 后正常。
+- **坑 2（仲裁静默失效，更隐蔽）**：自由文本 JSON 决策任务上，推理模型可能把 4095/4096 token 全烧进 reasoning（finish=length，content 空），prompt 里加"don't overthink"无效——**修复：决策调用改工具约束**（arbitrate/resolve function schema），与提取层同机制后零空响应。教训：对"必须结构化输出"的任务，用 function calling 强制收敛，而不是 prompt 祈祷。
+- **坑 3（转写全幻觉）**：faster-whisper 把 numpy 数组一律按 16kHz 解释——24kHz 音频直喂语速错乱，转写全是幻觉文本（见 Project §11）。
+- 面试句式："评测推理模型时，输出预算要给思考 token 留空间；结构化任务用工具约束保证收敛——这两个修复都有测试和日志实锤。"
 
 ---
 
