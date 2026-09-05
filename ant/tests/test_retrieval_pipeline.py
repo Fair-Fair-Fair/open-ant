@@ -128,7 +128,10 @@ async def test_qdrant_path_queries_with_hybrid_preference():
 
     results = await retriever.retrieve("hello")
 
-    assert store.calls == [("hello", {"top_k": 5, "prefer_hybrid": True})]
+    # where 参数自 Phase 7 起显式透传（默认 None）——租户隔离的钩子
+    assert store.calls == [
+        ("hello", {"top_k": 5, "prefer_hybrid": True, "where": None})
+    ]
     assert [d.id for d in results] == ["m1", "m2"]
     stats = retriever.get_stats()
     assert stats["total_queries"] == 1
@@ -151,7 +154,9 @@ async def test_retrieve_semantic_uses_pure_dense_for_qdrant():
 
     # merge_top_k = 3, and NO RRF — semantic similarity is the dedup signal
     assert store.calls[0][0] == "dedup check"
-    assert store.calls[0][1] == {"top_k": 3, "prefer_hybrid": False}
+    assert store.calls[0][1] == {
+        "top_k": 3, "prefer_hybrid": False, "where": None
+    }
 
 
 async def test_retrieve_semantic_failure_degrades_to_empty():

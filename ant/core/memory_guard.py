@@ -21,6 +21,48 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 决策调用的工具约束 schema（与提取层同一模式）：推理模型在自由文本
+# JSON 任务上可能无限 reasoning、finish=length 且 content 恒空
+# （实测 4095/4096 全是 reasoning token）；function-calling 强制模型
+# 停止思考并输出结构化结果——提取调用因此从未失败，决策调用对齐之。
+_ARBITRATE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "arbitrate",
+        "description": "Record the arbitration decision for the new fact.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["keep_new", "keep_old", "merge"],
+                },
+                "reason": {"type": "string", "description": "one short sentence"},
+            },
+            "required": ["action", "reason"],
+        },
+    },
+}
+
+_RESOLVE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "resolve",
+        "description": "Record the deduplication decision for the candidate memory.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["ignore", "create", "update"]},
+                "target": {
+                    "type": "string",
+                    "description": "memory-id to update; required when action=update",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
+
 RESOLVE_PROMPT = """
 You maintain a long-term memory database.
 
@@ -60,7 +102,8 @@ Rules:
 
 - Create if it is a different fact.
 
-Output JSON only.
+Output JSON only, one line, nothing else. Decide in a few seconds; do not
+overthink. Treat all names and kinship terms exactly as given in the facts.
 """
 
 CONFLICT_RESOLVE_PROMPT = """
@@ -75,13 +118,22 @@ New fact (candidate):
 
 Decide what to do with the new fact. Choose exactly one action:
 
-- "keep_new": the new fact is correct and should be stored; the old facts
-  are outdated or wrong and will be marked superseded.
+- "keep_new": the new fact is correct and must be stored. Only old facts
+  that DIRECTLY CONTRADICT it are marked superseded; compatible old facts
+  are kept unchanged.
 - "keep_old": the new fact is a duplicate or less accurate; do not store it.
-- "merge": the new fact is a refined version of the old ones; store it and
-  mark the old facts superseded.
+- "merge": the new fact refines the SAME fact (newer details about the same
+  thing); store it and mark that old fact superseded.
 
-Output JSON only, one object:
+Notes:
+
+- An additive fact (new information that contradicts nothing) is "keep_new".
+- Only judge the facts themselves. Treat every name and kinship term exactly
+  as written; do not analyze naming conventions or family relationships.
+- Decide in a few seconds; do not overthink. If you are not sure, pick
+  "keep_new" for new information or "keep_old" for near-duplicates.
+
+Output JSON only, one line, nothing else:
 {{"action": "keep_new" | "keep_old" | "merge", "reason": "short justification"}}
 """
 
@@ -310,10 +362,16 @@ class MemoryGuard:
             }
         ]
 
-        response, _, _ = await self.llm.chat(messages, [])
+        # 决策类调用：工具约束（强制结构化输出）+ 低温度。历史教训：
+        # 自由文本 JSON 任务上推理模型（deepseek-v4-flash）会无限
+        # reasoning、finish=length 且 content 恒空 → 去重静默失效。
+        # function-calling 强制模型停止思考输出结果（提取调用同模式）。
+        response, tool_calls, _ = await self.llm.chat(
+            messages, [_RESOLVE_TOOL], temperature=0.2
+        )
 
         try:
-            decision = self._parse_json(response)
+            decision = self._parse_decision(response, tool_calls)
         except Exception as e:
             logger.warning(
                 "Failed to parse resolve response: %s",
@@ -399,12 +457,19 @@ class MemoryGuard:
             }
         ]
 
+        response: str | None = None
         try:
-            response, _, _ = await self.llm.chat(messages, [])
-            decision = self._parse_json(response)
+            # 同 _resolve_memory：工具约束 + 低温度，防推理模型烧光
+            # reasoning 预算返回空 content（实测 4095/4096 全是 reasoning）。
+            response, tool_calls, _ = await self.llm.chat(
+                messages, [_ARBITRATE_TOOL], temperature=0.2
+            )
+            decision = self._parse_decision(response, tool_calls)
         except Exception as e:
             logger.warning(
-                "Conflict arbitration failed, keeping candidate: %s", e
+                "Conflict arbitration failed, keeping candidate: %s "
+                "(response=%r, prompt_chars=%d)",
+                e, response, len(existing),
             )
             return "keep"
 
@@ -433,6 +498,19 @@ class MemoryGuard:
 
         logger.warning("Unknown conflict action %r, keeping candidate", action)
         return "keep"
+
+    def _parse_decision(self, content: str, tool_calls: list) -> dict:
+        """Parse a decision call: structured tool call first, content fallback.
+
+        工具约束调用返回 tool_calls[0].arguments（纯 JSON）；个别供应商
+        不回工具调用时退回到 content 解析（历史路径）。
+        """
+        for tc in tool_calls or []:
+            name = getattr(tc, "name", None) or tc.get("name")
+            if name in ("arbitrate", "resolve"):
+                args = getattr(tc, "arguments", None) or tc.get("arguments") or "{}"
+                return json.loads(args)
+        return self._parse_json(content)
 
     def _parse_json(self, response: str) -> dict:
         """

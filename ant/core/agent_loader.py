@@ -45,7 +45,7 @@ class AgentLoader:
             raise DefNotFoundError("agent", agent_id)
 
         try:
-            content = agent_file.read_text()
+            content = agent_file.read_text(encoding="utf-8")
             agent_def = parse_definition(content, agent_id, self._parse_agent_def)
         except InvalidDefError:
             raise
@@ -90,7 +90,7 @@ class AgentLoader:
         """Load SOUL.md file for an agent if exists"""
         soul_file = self.config.agents_path / agent_def / "SOUL.md"
         if soul_file.exists():
-            return soul_file.read_text().strip()
+            return soul_file.read_text(encoding="utf-8").strip()
         return ""
 
     def _merge_llm_config(self, agent_llm: dict[str, Any] | None) -> LLMConfig:

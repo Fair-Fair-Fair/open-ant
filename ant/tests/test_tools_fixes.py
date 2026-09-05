@@ -264,7 +264,7 @@ class _FakeConfirmationBroker:
         pass
 
 
-async def _retrieve_memories():
+async def _retrieve_memories(current_message: str = ""):
     return None
 
 

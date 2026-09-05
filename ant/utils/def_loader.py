@@ -73,7 +73,9 @@ def discover_definitions(
             continue
 
         try:
-            content = def_file.read_text()
+            # 显式 UTF-8：中文 agent/skill/cron 定义在 Windows（cp936 locale）
+            # 下默认 read_text 会乱码/崩溃——Phase 7 记忆方舟接入中文 persona 时发现。
+            content = def_file.read_text(encoding="utf-8")
             result = parse_definition(content, def_dir.name, parse_fn)
             if result is not None:
                 results.append(result)
@@ -100,6 +102,6 @@ def write_definition(
     content = f"---\n{yaml_content}---\n\n{body.strip()}\n"
 
     def_file = def_dir / filename
-    def_file.write_text(content)
+    def_file.write_text(content, encoding="utf-8")
 
     return def_file

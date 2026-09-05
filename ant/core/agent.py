@@ -377,7 +377,7 @@ class AgentSession:
         if self.tools._governance:
             self.tools._governance.reset_turn_counts()
 
-        await self._retrieve_memories()
+        await self._retrieve_memories(message)
 
         # ── FSM: enter active processing ──
         try:
@@ -427,7 +427,7 @@ class AgentSession:
         # (session_factory present); no-op otherwise.  Same setattr safety
         # as above.
         recorder = UsageRecorder(
-            session_factory=self.context._session_factory
+            session_factory=self.shared_context._session_factory
         )
 
         async def _record_usage(data: dict) -> None:
@@ -483,13 +483,20 @@ class AgentSession:
             logger = logging.getLogger(__name__)
             logger.warning(f"Memory extraction task failed: {exc}")
 
-    async def _retrieve_memories(self) -> None:
-        """Retrieve relevant memories and inject into session state."""
+    async def _retrieve_memories(self, current_message: str = "") -> None:
+        """Retrieve relevant memories and inject into session state.
+
+        修复（记忆方舟演示暴露）：当前用户消息在 InputGuard 通过前
+        **不进入** state（护栏纪律，见 harness_stream_chat 注释），
+        而旧实现只从 state 的历史消息建 query——全新会话里 state 为空、
+        当前问题从未参与检索，memory_context 恒空。现在把当前消息作为
+        参数传入（仅用于检索，不落 state），query = 当前消息 + 最近历史。
+        """
         retriever = self.shared_context.memory_retriever
         if not retriever:
             return
 
-        query = self._build_retrieval_query()
+        query = self._build_retrieval_query(current_message)
         if not query:
             return
 
@@ -502,7 +509,7 @@ class AgentSession:
         except Exception as e:
             logger.debug(f"Memory retrieval failed: {e}")
 
-    def _build_retrieval_query(self) -> str:
+    def _build_retrieval_query(self, current_message: str = "") -> str:
         """Build a context-aware retrieval query from recent conversation turns.
 
         Instead of using only the last user message, this collects recent
@@ -510,6 +517,8 @@ class AgentSession:
         semantic drift in multi-turn dialogs.
         """
         user_messages = []
+        if current_message and current_message.strip():
+            user_messages.append(current_message.strip())
         for msg in reversed(self.state.messages):
             if msg.get("role") == "user":
                 content = msg.get("content", "")

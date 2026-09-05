@@ -303,8 +303,13 @@ async def test_query_filter_passthrough(monkeypatch):
     await store.query("hello", top_k=2, where=where)
     assert fake.query_calls[-1]["query_filter"] is where
 
+    # 普通 dict 会归一化为 Filter 模型（Phase 7 修复：docstring 声称支持
+    # 字典但实现把 dict 直接塞给 query_filter，真云会 400）
     await store.query("hello", top_k=2, where={"source": "docs/b.md"})
-    assert fake.query_calls[-1]["query_filter"] == {"source": "docs/b.md"}
+    normalized = fake.query_calls[-1]["query_filter"]
+    assert isinstance(normalized, Filter)
+    assert normalized.must[0].key == "source"
+    assert normalized.must[0].match.value == "docs/b.md"
 
 
 async def test_query_scores_min_max_normalized(monkeypatch):

@@ -14,7 +14,7 @@ Its first application scenario is the **Memory Ark** — a cognitive-assistance 
 
 ---
 ![](images/GraphMemory.png)
-![](images/CompanyDay.jpg)
+![](images/CognitiveCompanion.png)
 ## A Day on the Memory Ark
 
 ```text
