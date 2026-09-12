@@ -361,6 +361,35 @@ def test_from_config_reads_new_fields(monkeypatch) -> None:
     assert provider.summarize_model == "small-summarizer"
 
 
+def test_from_config_forwards_overrides_to_settings(monkeypatch) -> None:
+    """from_config(**overrides) lands in _settings（评测非思考开关的通道）。"""
+    monkeypatch.setattr("ant.provider.llm.base.Router", FakeRouter)
+    cfg = LLMConfig(provider="fake", model="deepseek/deepseek-v4-flash",
+                    api_key="sk-test")
+    provider = LLMProvider.from_config(
+        cfg, extra_body={"thinking": {"type": "disabled"}}
+    )
+    assert provider._settings == {"extra_body": {"thinking": {"type": "disabled"}}}
+
+
+def test_request_kwargs_merge_construction_settings(monkeypatch) -> None:
+    """构造参数应用到每次请求；per-call kwargs 仍优先。"""
+    monkeypatch.setattr("ant.provider.llm.base.Router", FakeRouter)
+    provider = LLMProvider(
+        model="m", api_key="sk-test",
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    kw = provider._build_request_kwargs(
+        [{"role": "user", "content": "hi"}], stream=False,
+    )
+    assert kw["extra_body"] == {"thinking": {"type": "disabled"}}
+    kw2 = provider._build_request_kwargs(
+        [{"role": "user", "content": "hi"}], stream=False,
+        extra_body={"other": 1},
+    )
+    assert kw2["extra_body"] == {"other": 1}  # per-call 覆盖构造参数
+
+
 # ---------------------------------------------------------------------------
 # Config defaults (contract for parallel agents)
 # ---------------------------------------------------------------------------

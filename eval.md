@@ -6,9 +6,10 @@
 > 目标是产出可写进简历的数字："我们在 LongMemEval（ICLR 2025）上跑出 X%，
 > 对比无记忆基线 +Y%"。
 >
-> 状态：**Phase 7 进行中**（2026-09-02）。LongMemEval 基础设施 + 两个模式已出数；
-> 剩余运行见「恢复执行」。GAIA / RULER 为后续阶段。详细逻辑见 `workspace/code.md`
-> Phase 7 章节（对应提交 `d1a1a7d` / `be046e1` / `976d328` / `5824618`）。
+> 状态：**Phase 7 完成 ✅（2026-09-07）**。LongMemEval 五档消融全部出数，
+> 正式报告在 **`src/evals/report_longmemeval.md`**（结果/归因/成本/诚实边界/面试一句话）。
+> GAIA / RULER 为后续阶段。执行日志与踩坑见 `workspace/code.md` Phase 7 章节
+> （对应提交 `d1a1a7d` / `be046e1` / `976d328` / `5824618` 及后续评测修复提交）。
 
 ---
 
@@ -40,15 +41,24 @@
 - **生产修复**（`d1a1a7d`）：发现并修复 `graph.ingest` 从未被调用（生产图是空的，记忆仲裁从未真实生效）+ 向量/图 id 对齐 + `where` 租户隔离过滤（`MemoryRetriever.retrieve/retrieve_semantic`、`MemoryGuard.extract_memories`）。
 - **harness**（`be046e1`）：`evals/run_longmemeval_eval.py`（四模式 runner）+ `evals/longmemeval_judge.py`（官方 prompt 逐字移植，MIT）+ `evals/cleanup_longmemeval_graph.py`。37 个纯函数测试。
 - **性能修复**（`5824618`）：批量 add（chunks 100 条/批、记忆按提取批聚合——全量 24.6 万 turn 逐条 upsert 需 7 小时）、逐实例增量落盘（可中断 + `--resume`）、提取 `max_tokens` 透传（大批次 4000）。
-- **两模式已出数**（500 题全量，官方 judge 协议，deepseek-v4-flash）：
+- **评测环境隔离修复**（2026-09-07）：memory/chunks 各用独立集合（跨模式污染事故的修复，回归测试 `test_eval_collection_per_mode_isolation`）。
+- **五档消融全部出数 ✅**（协议 v2：answerer/提取/judge 全链非思考，对齐官方 gpt-4o 协议形态；
+  详细报告 → `evals/report_longmemeval.md`）：
 
-| 模式 | Overall | 含义 |
+| 模式 | 同子集（n=100, seed=42） | 全量 500 |
 |---|---|---|
-| baseline（无记忆） | **6.0%** | 地板 ≈ 30 道 abstention 得分，证明题离开历史确实答不了 |
-| oracle（evidence 注入） | **62.6%** | 上限：信息无损时模型的答案能力 |
+| baseline（无记忆） | 4.0% | 7.0% |
+| memory（user-only 提取，生产口径） | **50.0%** | — |
+| memory（user+assistant 提取，对照） | 53.0% | — |
+| chunks（原始文本检索） | 67.0% | **52.0%** |
+| oracle（evidence 注入） | 77.0% | 66.4%（thinking 归档） |
 
-  oracle 分题型：assistant 98.2% / user 90.0% / knowledge-update 73.1% / multi-session 61.7% / **temporal 36.8%** / **preference 23.3%**（后两者是模型天花板，预先免责）。
-  官方 GPT-4o 检索模式基线 57.7%——我们的 memory 管线数字落在 6%–62.6% 区间内，越接近上限越好。
+  核心结论：① 思考模式是提取环节的**系统性负优化**——协议 v2 让生产口径
+  从 4% 到 50%（10×）；② user-only 与 user+assistant 仅差 3pp（生产隐私
+  策略几乎免费）；③ knowledge-update 类压缩记忆反超原始文本（80.0% vs
+  66.7%）；④ judge 尺子法证（三类缺陷：空 content 假阴性 / 空回答假阳性 /
+  litellm 参数静默丢弃）——审计证据 audit_judge_ruler.py。官方 GPT-4o
+  检索模式基线 57.7%（全量口径）。
 
 ### 3.2 踩过的坑（面试素材）
 
@@ -56,38 +66,36 @@
 2. **向量维度与模型不符**：bge-small-**zh**-v1.5 是 **512 维**（≠ 英文 small 的 384），`.env` 旧值 QDRANT_VECTOR_SIZE=384 导致写入 400——用户已改 512。⚠️ 待查生产集合 `ant_memory` 是否按旧维度创建（若是，生产记忆写入一直在静默失败——异常被 `_maybe_extract_memories` 吞掉）。
 3. 数据集比预期大一个数量级（24.6 万 turn），逐条 HTTP 写入不可行 → 批量化。
 
-### 3.3 恢复执行（从这里继续）
+### 3.3 已执行命令存档（完成 ✅）
 
 数据（repo 外）：`workspace/evals/longmemeval/LongMemEval/data/longmemeval_s_cleaned.json`（277MB）+ `longmemeval_oracle.json`（15MB）。输出：`workspace/evals/longmemeval/out/<mode>/hypotheses.jsonl`。
 
 ```bash
 cd src
-# ① chunks 500（批量化版，约 40 分钟；已中断可 --resume 续跑）
+# 全量 500：baseline / oracle / chunks（各 ~2.5h 回答耗时，已全部出数）
 python -m evals.run_longmemeval_eval --mode chunks --n 500 --resume
 
-# ② memory 500 graph off（bs=12/conc=10/max_tokens=4000，约 1.5–2 小时；同样可 --resume）
-python -m evals.run_longmemeval_eval --mode memory --n 500 --graph off --resume
+# memory 对照（n=100 seed=42，user+assistant 提取，独立集合 ant_memory_lmeval_memory）
+python -m evals.run_longmemeval_eval --mode memory --n 100 --seed 42 --graph off --extract-assistant
 
-# ③ （可选）memory graph on 对照：Neo4j Aura 实体名 lmeval-<idx>:: 命名空间隔离
+# （可选）memory graph on 对照：Neo4j Aura 实体名 lmeval-<idx>:: 命名空间隔离
 python -m evals.run_longmemeval_eval --mode memory --n 500 --graph on --resume
-# 跑完必须清理（只删评测命名空间，不碰用户数据）：
-python -m evals.cleanup_longmemeval_graph
+python -m evals.cleanup_longmemeval_graph  # 只删评测命名空间，不碰用户数据
 
-# ④ 官方 judge 评分（deepseek 默认；换更强模型 --judge-model 可复评）
+# 官方 judge 评分（deepseek 默认；换更强模型 --judge-model 可复评）
 python -m evals.longmemeval_judge \
-    --hyp ../workspace/evals/longmemeval/out/chunks/hypotheses.jsonl \
+    --hyp ../workspace/evals/longmemeval/out/<mode>/hypotheses.jsonl \
     --ref ../workspace/evals/longmemeval/LongMemEval/data/longmemeval_s_cleaned.json
-# 对 memory / baseline / oracle 同理
 ```
 
-注意：`--resume` 依赖 hypotheses.jsonl 增量落盘；**全新运行会重建专用 Qdrant 集合 `ant_memory_lmeval`**（无 resume 时），所以 memory/chunks 的续跑必须带 `--resume`，否则集合被清、已入库实例的记忆丢失（续跑时 500 题里已写完的会跳过，未写的会重新提取入库）。
+注意：`--resume` 依赖 hypotheses.jsonl 增量落盘；**全新运行会重建专用 Qdrant 集合**（无 resume 时，按 mode 隔离），所以续跑必须带 `--resume`，否则集合被清、已入库实例的记忆丢失。
 
-### 3.4 出报告（judge 全部跑完后）
+### 3.4 出报告（完成 ✅）
 
-1. 写 `src/evals/report_longmemeval.md`：四模式 × 分题型汇总表 + 消融分析（memory vs baseline 的 Δ = 记忆系统贡献；memory vs oracle 的差距 = 提取/检索损耗）+ 成本 + 诚实边界（提取只取用户消息 → assistant 类预期低分，`--extract-assistant` 可跑对照；批量时间戳近似；judge 与 answerer 同模型的自评偏差）。
-2. `workspace/code.md` 追加最终数字（只追加）。
-3. `src/interview.md`：新增/更新「怎么评判 Agent 好坏」Q&A——三层评估体系 + LongMemEval 数字。
-4. `application.md`（简历）：bullet 示例——"在 LongMemEval（ICLR 2025，500 题）上以 deepseek 跑出 X%：无记忆基线 6.0% → 记忆管线 X%，oracle 上限 62.6%；记忆图入库缺陷（仲裁从未生效）由 benchmark 前验收发现并修复"。
+1. ✅ `src/evals/report_longmemeval.md`——五档消融 × 分题型 + 归因 + 成本 + 诚实边界 + 面试一句话。
+2. ✅ `workspace/code.md` 追加最终数字（只追加）。
+3. ✅ `src/interview.md` §24 数字化证据链更新。
+4. ✅ `application.md`（简历）公开基准 bullet + 追问预案更新。
 
 ## 4. 后续阶段计划（未开始）
 

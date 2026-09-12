@@ -106,8 +106,46 @@ def judge_prompt(
     raise ValueError(f"unknown question_type: {question_type!r}")
 
 
+def judge_request_kwargs(model: str | None) -> dict:
+    """judge 调用的请求参数（纯函数，可测试）。
+
+    官方脚本用 max_tokens=10（gpt-4o 非推理模型）。deepseek-v4-flash
+    默认开启思考模式：10 token 预算会被隐藏 reasoning 吃光、content
+    恒为空 → 全判 False（2026-09-07 实测：max_tokens=256 仍偶发
+    stop=length 空 content——假阴性隐患）。
+    修复：DeepSeek API 支持 thinking={"type":"disabled"}，但 litellm
+    1.89.3 的 deepseek transformer 只转发 {"type":"enabled"}
+    （disabled / reasoning_effort="none" 都被静默丢弃、不发 API），
+    必须用 extra_body 直传原始 JSON 才生效（workspace/evals/longmemeval/
+    audit_judge_ruler.py 第 1 节实测：reasoning_tokens 41→0、
+    completion 43→1）。
+    非 DeepSeek judge（如 gpt-4o）天然非思考，不附加 extra_body。
+    """
+    kwargs: dict = {"temperature": 0, "max_tokens": 10}
+    if "deepseek" in (model or ""):
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    return kwargs
+
+
+def empty_hypothesis_verdict(hypothesis: str) -> bool | None:
+    """退化回答的确定性判定（纯函数，可测试）。
+
+    空/纯空白回答不包含答案、也不构成「识别不可答」→ 必判 False。
+    实测非思考 judge 对空 Model Response 会误判 yes（2026-09-07 头对头
+    审计：oracle 空回答 125 道中被判 yes 22 道，见 workspace/evals/
+    longmemeval/audit_judge_ruler.py 第 3 节）——退化输入必须在
+    LLM judge 之前确定性短路。其他情况返回 None，交给 LLM judge。
+    """
+    if not (hypothesis or "").strip():
+        return False
+    return None
+
+
 async def judge_one(llm, entry: dict, hypothesis: str) -> bool:
     """Run the judge for one (ref entry, hypothesis) pair."""
+    deterministic = empty_hypothesis_verdict(hypothesis)
+    if deterministic is not None:
+        return deterministic
     prompt = judge_prompt(
         entry["question_type"],
         entry["question"],
@@ -115,12 +153,9 @@ async def judge_one(llm, entry: dict, hypothesis: str) -> bool:
         hypothesis,
         abstention=entry["question_id"].endswith("_abs"),
     )
-    # 官方脚本用 max_tokens=10（gpt-4o 非推理模型）。本项目默认模型是
-    # 推理模型（deepseek-v4-flash）：10 token 预算会被隐藏 reasoning 吃光、
-    # content 恒为空 → 全判 False。256 让 reasoning + "yes/no" 都有空间
-    # （实测 reasoning ~210 token + 1-2 token 结论；chat() 只回传最终 content）。
     response, _, _ = await llm.chat(
-        [{"role": "user", "content": prompt}], [], temperature=0, max_tokens=256
+        [{"role": "user", "content": prompt}], [],
+        **judge_request_kwargs(getattr(llm, "model", None)),
     )
     return "yes" in (response or "").lower()
 

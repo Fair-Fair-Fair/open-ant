@@ -6,17 +6,143 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
-from evals.longmemeval_judge import aggregate, judge_prompt
+from evals.longmemeval_judge import (
+    aggregate,
+    empty_hypothesis_verdict,
+    judge_prompt,
+    judge_request_kwargs,
+)
 from evals.run_longmemeval_eval import (
+    _ingest_instance,
+    _wipe_target,
     answer_prompt,
+    apply_sparse_model,
+    eval_collection_for_mode,
     evidence_text,
     instance_filter,
     load_done_ids,
+    non_thinking_overrides,
     normalize_ts,
     sample_instances,
 )
+
+
+def test_eval_collection_per_mode_isolation():
+    """memory/chunks 必须各用独立集合（2026-09-07 跨模式污染事故回归）。"""
+    assert eval_collection_for_mode("memory") == "ant_memory_lmeval_memory"
+    assert eval_collection_for_mode("chunks") == "ant_memory_lmeval_chunks"
+    assert eval_collection_for_mode("baseline") == "ant_memory_lmeval"
+    assert eval_collection_for_mode("oracle") == "ant_memory_lmeval"
+
+
+# ── judge 非思考模式（2026-09-07 推理模型吃光 max_tokens 事故回归） ─────────
+
+
+def test_judge_request_kwargs_deepseek_gets_thinking_disabled():
+    """DeepSeek 思考模型必须用 extra_body 直传 thinking=disabled——
+    litellm 1.89.3 transformer 只转发 enabled（disabled/none 静默丢弃）。"""
+    kwargs = judge_request_kwargs("deepseek/deepseek-v4-flash")
+    assert kwargs["max_tokens"] == 10
+    assert kwargs["temperature"] == 0
+    assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_judge_request_kwargs_non_deepseek_no_extra_body():
+    kwargs = judge_request_kwargs("openai/gpt-4o")
+    assert kwargs["max_tokens"] == 10
+    assert "extra_body" not in kwargs
+
+
+def test_judge_request_kwargs_none_model_no_extra_body():
+    assert "extra_body" not in judge_request_kwargs(None)
+
+
+# ── 退化回答确定性短路（2026-09-07 非思考 judge 对空回答误判 yes 事故回归） ──
+
+
+def test_empty_hypothesis_verdict_false():
+    assert empty_hypothesis_verdict("") is False
+    assert empty_hypothesis_verdict("   \n\t") is False
+
+
+def test_empty_hypothesis_verdict_non_empty_defers_to_llm():
+    assert empty_hypothesis_verdict("I don't know.") is None
+    assert empty_hypothesis_verdict("Four") is None
+
+
+# ── 评测全链非思考（协议 v2：对齐官方 gpt-4o 非思考协议） ─────────────────
+
+
+def test_non_thinking_overrides_deepseek_extra_body():
+    assert non_thinking_overrides("deepseek/deepseek-v4-flash") == {
+        "extra_body": {"thinking": {"type": "disabled"}}
+    }
+
+
+def test_non_thinking_overrides_non_deepseek_empty():
+    assert non_thinking_overrides("openai/gpt-4o") == {}
+    assert non_thinking_overrides(None) == {}
+
+
+# ── wipe 按模式 + 提取幂等（2026-09-11 wipe 未随隔离修复更新的回归） ─────
+
+
+def test_wipe_target_uses_per_mode_collection():
+    """fresh 跑必须清按模式隔离的集合，不是旧共享名 EVAL_COLLECTION。"""
+    assert _wipe_target("memory") == "ant_memory_lmeval_memory"
+    assert _wipe_target("chunks") == "ant_memory_lmeval_chunks"
+    assert _wipe_target("memory") != "ant_memory_lmeval"  # 事故断言
+
+
+async def test_ingest_instance_precleans_own_points():
+    """提取前先 delete_by_filter 本实例旧点（中断续跑不产生重复记忆）。"""
+    calls: list = []
+
+    class FakeStore:
+        async def add(self, documents=None, metadatas=None, ids=None):
+            calls.append(("add", len(documents or [])))
+
+        async def delete_by_filter(self, where):
+            calls.append(("delete", where))
+
+    class FakeGuard:
+        async def extract_memories(self, messages, where=None, max_tokens=None):
+            return [{
+                "content": "fact", "category": "fact", "importance": 5,
+                "keywords": [], "memory_id": "m1",
+            }]
+
+    ctx = SimpleNamespace(
+        memory_guard=FakeGuard(), vector_store=FakeStore(), graph=None
+    )
+    inst = {
+        "haystack_sessions": [[{"role": "user", "content": "hi"}]],
+        "haystack_dates": ["2023/01/01 (Sun) 00:00"],
+    }
+    n = await _ingest_instance(ctx, inst, idx=7, batch_size=12)
+    assert n == 1
+    assert calls[0] == ("delete", {"session_id": "lmeval-7"})
+    assert calls[1][0] == "add" and calls[1][1] == 1
+
+
+# ── 评测稀疏模型覆写（2026-09-11 fastembed BM25 依赖 GCS 国内不可达回归） ──
+
+
+def test_apply_sparse_model_patches_memory_config():
+    cfg = SimpleNamespace(memory=SimpleNamespace(sparse_model="fastembed"))
+    apply_sparse_model(cfg, "jieba")
+    assert cfg.memory.sparse_model == "jieba"
+
+
+def test_apply_sparse_model_none_is_noop():
+    cfg = SimpleNamespace(memory=SimpleNamespace(sparse_model="fastembed"))
+    apply_sparse_model(cfg, None)
+    assert cfg.memory.sparse_model == "fastembed"
+
 
 # ── judge 模板（官方契约） ──────────────────────────────────────────────────
 

@@ -138,8 +138,14 @@ class LLMProvider:
             self._router = Router(**router_kwargs)
 
     @classmethod
-    def from_config(cls, config: "LLMConfig") -> "LLMProvider":
-        """Create provider from LLMConfig."""
+    def from_config(cls, config: "LLMConfig", **overrides: Any) -> "LLMProvider":
+        """Create provider from LLMConfig.
+
+        ``overrides`` are extra construction kwargs (e.g. ``extra_body``
+        for provider-specific request-body fields).  They land in
+        ``_settings`` and are merged into every request by
+        ``_build_request_kwargs`` — per-call kwargs still win.
+        """
         return cls(
             model=config.model,
             api_key=config.api_key,
@@ -150,6 +156,7 @@ class LLMProvider:
             timeout=config.timeout,
             fallbacks=list(config.fallbacks or []),
             summarize_model=config.summarize_model,
+            **overrides,
         )
 
     async def chat(
@@ -431,6 +438,10 @@ class LLMProvider:
             base["api_base"] = self.api_base
         if tools:
             base["tools"] = tools
+        # Construction-time settings (from_config **overrides) apply to every
+        # request — e.g. extra_body={"thinking": {"type": "disabled"}} for
+        # non-thinking evals.  Per-call kwargs still win below.
+        base.update(self._settings)
         base.update(kwargs)
 
         return base

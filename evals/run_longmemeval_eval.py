@@ -69,6 +69,18 @@ DEFAULT_DATA = (
 DEFAULT_OUT = DEFAULT_WS / "evals" / "longmemeval" / "out"
 EVAL_COLLECTION = "ant_memory_lmeval"
 
+
+def eval_collection_for_mode(mode: str) -> str:
+    """每个模式独立集合，防止跨模式检索空间互相污染。
+
+    事故记录（2026-09-07）：三模式共用 ant_memory_lmeval，memory 模式的
+    回答检索把 chunks 文档点也捞了进来（session_id 相同），16.6% 弃权
+    结果无效。自此 memory/chunks 各用独立集合，fresh 跑互相清零互不影响。
+    """
+    if mode in ("memory", "chunks"):
+        return f"{EVAL_COLLECTION}_{mode}"
+    return EVAL_COLLECTION
+
 ANSWER_INSTRUCTION = (
     "Answer the user's question. Use the memory context below if it contains "
     "relevant information. If the context does not contain enough information "
@@ -231,6 +243,10 @@ async def _ingest_instance(
     where = instance_filter(idx)
     total = 0
 
+    # 幂等：中断续跑时本实例可能已有部分入库的记忆点（memory_id 是随机
+    # UUID，重提取不会覆盖而是重复）——提取前先清掉自己的旧点。
+    await vector_store.delete_by_filter(where)
+
     sessions = inst["haystack_sessions"]
     dates = inst["haystack_dates"]
     for start in range(0, len(sessions), batch_size):
@@ -355,13 +371,41 @@ async def _index_chunks(ctx, inst: dict, idx: int) -> int:
 # ── 主流程 ──────────────────────────────────────────────────────────────────
 
 
-def _build_llm(config):
+def non_thinking_overrides(model: str) -> dict:
+    """非思考模式的 litellm 构造参数（纯函数，可测试）。
+
+    官方协议：gpt-4o（非思考模型）直答 + max_tokens=10 判分。我们模型
+    deepseek-v4-flash 默认开启思考——reasoning 烧 max_tokens 预算曾造成
+    空回答（oracle 125/500）与空判定。DeepSeek API 支持
+    thinking={"type":"disabled"}，但 litellm 1.89.3 的 deepseek transformer
+    只转发 {"type":"enabled"}（disabled / reasoning_effort="none" 都被
+    静默丢弃），必须用 extra_body 直传（audit_judge_ruler.py 第 1 节实测）。
+    非 DeepSeek 模型天然非思考，不需要也不应附加。
+    """
+    if "deepseek" in (model or ""):
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {}
+
+
+def _build_llm(config, no_thinking: bool = True):
     from ant.provider.llm.base import LLMProvider
 
-    return LLMProvider.from_config(config.llm)
+    overrides = non_thinking_overrides(config.llm.model) if no_thinking else {}
+    return LLMProvider.from_config(config.llm, **overrides)
 
 
-async def _wipe_eval_collection() -> None:
+def _wipe_target(mode: str) -> str:
+    """fresh 跑要清掉的集合名（纯函数，可测试）。
+
+    回归（2026-09-11）：按模式隔离修复后，wipe 仍在删旧共享集合名
+    EVAL_COLLECTION——fresh memory 跑不会清 ant_memory_lmeval_memory
+    里的旧点，新旧提取的记忆会混存（与 16.6% 污染事故同类）。
+    wipe 必须指向 eval_collection_for_mode 的按模式集合。
+    """
+    return eval_collection_for_mode(mode)
+
+
+async def _wipe_eval_collection(mode: str) -> None:
     """重建专用 Qdrant 集合（幂等；忽略不存在）。"""
     from ant.utils.settings import InfraSettings
 
@@ -375,20 +419,38 @@ async def _wipe_eval_collection() -> None:
         url=infra.qdrant_url(), api_key=infra.qdrant_api_key(),
         timeout=infra.qdrant_timeout,
     )
+    target = _wipe_target(mode)
     try:
-        await client.delete_collection(EVAL_COLLECTION)
-        logger.info("已删除旧评测集合 %s", EVAL_COLLECTION)
+        await client.delete_collection(target)
+        logger.info("已删除旧评测集合 %s", target)
     except Exception:  # noqa: BLE001 — not found is fine
         pass
     await client.close()
 
 
-def _build_context(workspace: Path, graph_on: bool):
+def apply_sparse_model(config, sparse_model: str | None) -> None:
+    """评测专用稀疏模型覆写（纯函数，可测试）。
+
+    默认 fastembed BM25 依赖 GCS 下载（国内网络不可达，2026-09-11
+    chunks 全实例 sparse 加载失败）；评测改用本地 jieba，零网络依赖。
+    仅改进程内 config 对象，不落盘、不影响生产。
+    """
+    if sparse_model and getattr(config, "memory", None) is not None:
+        config.memory.sparse_model = sparse_model
+
+
+def _build_context(
+    workspace: Path,
+    graph_on: bool,
+    collection: str,
+    sparse_model: str | None = None,
+):
     from ant.core.context import SharedContext
     from ant.utils.config import Config
 
-    os.environ["QDRANT_COLLECTION"] = EVAL_COLLECTION  # 必须早于 Context 构造
+    os.environ["QDRANT_COLLECTION"] = collection  # 必须早于 Context 构造
     config = Config.load(workspace)
+    apply_sparse_model(config, sparse_model)
     ctx = SharedContext(config)
     if not graph_on:
         ctx.graph = None  # 关图：仲裁/扩展全部跳过（消融对照）
@@ -424,11 +486,21 @@ async def _run_mode(args, mode: str) -> int:
         )
         logger.info("提取口径: 用户+助手消息（对照实验）")
 
-    ctx, config = _build_context(Path(args.workspace), graph_on=args.graph == "on")
-    llm = _build_llm(config)
+    ctx, config = _build_context(
+        Path(args.workspace),
+        graph_on=args.graph == "on",
+        collection=eval_collection_for_mode(mode),
+        sparse_model=args.sparse,
+    )
+    llm = _build_llm(config, no_thinking=not args.thinking)
+    # 提取/仲裁也走同一个非思考 provider（官方协议对齐；官方无仲裁环节，
+    # graph on 是我们独有的增量实验，同样用非思考保持全协议一致）
+    if getattr(ctx, "memory_guard", None) is not None:
+        ctx.memory_guard.llm = llm
     logger.info(
-        "模型: %s / vector_backend=%s / graph=%s",
+        "模型: %s（thinking=%s）/ vector_backend=%s / graph=%s",
         config.llm.model,
+        "on" if args.thinking else "off",
         getattr(config.memory, "vector_backend", "?"),
         args.graph,
     )
@@ -517,6 +589,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--concurrency", type=int, default=10)
     parser.add_argument("--extract-assistant", action="store_true",
                         help="对照实验：提取用户+助手消息（默认仅用户，生产口径）")
+    parser.add_argument(
+        "--thinking", action="store_true", default=False,
+        help="回答+提取使用思考模式（默认关闭，对齐官方 gpt-4o 非思考协议；A/B 对照用）",
+    )
+    parser.add_argument(
+        "--sparse", default=None, choices=["jieba", "fastembed"],
+        help="稀疏模型覆写：默认 None=用配置（fastembed BM25）；"
+             "jieba 为本地零网络降级（BM25 缓存丢失且 GCS 不可达时）",
+    )
     parser.add_argument("--resume", action="store_true",
                         help="跳过 hypotheses.jsonl 中已完成的 question_id")
     args = parser.parse_args(argv)
@@ -524,7 +605,7 @@ def main(argv: list[str] | None = None) -> int:
     # memory/chunks 需要向量库：全新运行时重建专用集合。
     # --resume 时保留集合（已入库实例的记忆是续跑的前提）。
     if args.mode in ("memory", "chunks") and not args.resume:
-        asyncio.run(_wipe_eval_collection())
+        asyncio.run(_wipe_eval_collection(args.mode))
     return asyncio.run(_run_mode(args, args.mode))
 
 
