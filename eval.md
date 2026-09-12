@@ -47,18 +47,18 @@
 
 | 模式 | 同子集（n=100, seed=42） | 全量 500 |
 |---|---|---|
-| baseline（无记忆） | 4.0% | 7.0% |
+| baseline（无记忆） | 4.0% | 7.0%（thinking 归档） |
 | memory（user-only 提取，生产口径） | **50.0%** | — |
 | memory（user+assistant 提取，对照） | 53.0% | — |
-| chunks（原始文本检索） | 67.0% | **52.0%** |
+| chunks（原始文本检索） | 67.0% | **64.0%** |
 | oracle（evidence 注入） | 77.0% | 66.4%（thinking 归档） |
 
   核心结论：① 思考模式是提取环节的**系统性负优化**——协议 v2 让生产口径
   从 4% 到 50%（10×）；② user-only 与 user+assistant 仅差 3pp（生产隐私
   策略几乎免费）；③ knowledge-update 类压缩记忆反超原始文本（80.0% vs
   66.7%）；④ judge 尺子法证（三类缺陷：空 content 假阴性 / 空回答假阳性 /
-  litellm 参数静默丢弃）——审计证据 audit_judge_ruler.py。官方 GPT-4o
-  检索模式基线 57.7%（全量口径）。
+  litellm 参数静默丢弃）——审计证据 audit_judge_ruler.py。全量口径我们
+  chunks 64.0% vs 官方 GPT-4o 检索基线 57.7%（检索配置不同，仅量级对照）。
 
 ### 3.2 踩过的坑（面试素材）
 

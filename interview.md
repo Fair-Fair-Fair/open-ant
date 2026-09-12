@@ -466,7 +466,7 @@ Trace 5f8b2c1d…9e6f   总耗时 9.8s   ← 一条用户消息 = 一条 Trace
 
 - **30 秒版（背）**："我的项目是一个 24/7 常驻的个人 AI 助手运行时。2026 年 always-on agent 成为行业公认品类（OpenClaw 引爆，Gemini Spark、微软 Scout 跟进），但这类系统要把电脑和账号权限交给模型——安全厂商公开警告（CVE-2026-25253 网关劫持 8.8 分、恶意 skill 市场、prompt injection 删邮件事故）。我的项目回答这个品类的**信任问题**：消息不丢（RabbitMQ DLX 五级重试 + outbox + 幂等）、权限可控（三层沙箱/HITL/审计）、记忆可仲裁（Neo4j 冲突检测 + LongMemEval 评测）、全链路可观测（OTel/Prometheus），462 个自动化测试 + CI，已发布 PyPI。"
 - **场景升华**：第一个应用场景是记忆方舟（AD 认知辅助概念验证，见 Project §11）——不是"造轮子"，是技术恰好能承载一个真正重要的场景。
-- **数字化证据链**：LongMemEval（ICLR 2025，官方 judge 协议逐字移植）五档消融——无记忆 4.0% → 生产口径记忆 50.0% → 原始文本 67.0% → oracle 77.0%（协议 v2 全链非思考对齐官方 gpt-4o 协议形态，同子集 n=100；全量 500 chunks 52.0%；每档 Δ 都有归因，报告 `evals/report_longmemeval.md`）；检索 recall@5=0.983；护栏 85%/FP 0%。
+- **数字化证据链**：LongMemEval（ICLR 2025，官方 judge 协议逐字移植）五档消融——无记忆 4.0% → 生产口径记忆 50.0% → 原始文本 67.0% → oracle 77.0%（协议 v2 全链非思考对齐官方 gpt-4o 协议形态，同子集 n=100；全量 500 chunks 64.0%；每档 Δ 都有归因，报告 `evals/report_longmemeval.md`）；检索 recall@5=0.983；护栏 85%/FP 0%。
 - 可追问落点：`eval.md`（三层评估体系）、`memory-ark.md`（场景映射表）、README 的"为什么是 OpenAnt"章节。
 
 ### 25. 语音交互怎么做？（终端语音模式）

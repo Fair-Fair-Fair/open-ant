@@ -17,8 +17,8 @@
 | baseline（无记忆） | 4.0% | 地板 ≈ abstention 得分，证明题离开历史确实答不了 |
 | **memory（user-only 提取，生产口径）** | **50.0%** | 生产记忆管线：只用用户消息提取（防助手知识污染） |
 | memory（user+assistant 提取，对照） | 53.0% | 放开提取口径仅 +3pp |
-| chunks（原始文本检索） | 67.0%（子集）/ 52.0%（全量） | 检索层上限：压缩必然有损 |
-| oracle（evidence 注入） | 77.0%（子集）/ 66.4%（全量，thinking 归档） | 数据无损时模型的上限 |
+| chunks（原始文本检索） | 67.0%（子集 n=100）/ **64.0%（全量 500）** | 检索层上限：压缩必然有损 |
+| oracle（evidence 注入） | 77.0%（子集）/ 66.4%（全量 500，thinking 时代归档） | 数据无损时模型的上限 |
 
 **三个核心发现：**
 
@@ -38,6 +38,23 @@
 | temporal-reasoning | 0.0 | 48.1 | 66.7 | 51.9 | 55.6 |
 | knowledge-update | 6.7 | 100.0 | 66.7 | **80.0** | **80.0** |
 | single-session-preference | 0.0 | 50.0 | 66.7 | 50.0 | 66.7 |
+
+### 2.1 数字 = 分数对照（每个百分比都可核，零 LLM 复算：`workspace/evals/longmemeval/audit_numbers.py`）
+
+小分母必然产生"整"数——分题型分母只有 27/15/14/11/6：
+
+| 数字 | 分数 | 数字 | 分数 |
+|---|---|---|---|
+| 67.0%（chunks 子集） | 67/100 | 66.7%（temporal-chunks） | 18/27 |
+| 64.0%（chunks 全量） | 320/500 | 55.6%（temporal u+asst） | 15/27 |
+| 50.0%（mem user-only） | 50/100 | 51.9%（temporal user-only） | 14/27 |
+| 53.0%（mem u+asst） | 53/100 | 48.1%（temporal oracle） | 13/27 |
+| 80.0%（knowledge-update 记忆两档） | 12/15 | 44.4%（multi-session chunks） | 12/27 |
+| 66.7%（knowledge-update chunks） | 10/15 | 37.0%（multi u+asst） | 10/27 |
+| 100.0%（oracle 多类） | 15/15、11/11、14/14 | 33.3%（multi user-only） | 9/27 |
+| 92.9%（user-chunks） | 13/14 | 78.6%（user 记忆两档） | 11/14 |
+| 90.9%（assistant-chunks） | 10/11 | 9.1%（assistant 记忆两档） | 1/11 |
+| 4.0%（baseline） | 4/100 | 7.1%（user-baseline） | 1/14 |
 
 ## 3. judge 尺子法证（评测协议本身的三类缺陷，全部定位+修复+回归测试）
 
@@ -66,8 +83,8 @@
 
 ## 6. 诚实边界清单（面试主动说）
 
-1. **模型不同**：对齐的是官方**协议形态**（非思考 + 同款 judge 契约），模型是 deepseek-v4-flash ≠ 官方 gpt-4o。全量 500 参考：官方 gpt-4o 检索 57.7% vs 我们 chunks 52.0%。
-2. **子集披露**：消融主表 n=100 seed=42；chunks 子集 67.0% vs 全量 52.0% 的 15pp 差异是抽样方差，两者都报告。
+1. **模型不同**：对齐的是官方**协议形态**（非思考 + 同款 judge 契约），模型是 deepseek-v4-flash ≠ 官方 gpt-4o。全量 500 口径：我们 chunks 64.0%；官方 gpt-4o 检索 57.7%（检索配置不同，仅量级对照）。
+2. **子集披露**：消融主表 n=100 seed=42；chunks 子集 67.0% vs 全量 64.0%（3pp，抽样波动方向一致），两者都报告。
 3. **自评偏差**：judge 与 answerer 同模型；官方同用 gpt-4o 作 judge，偏差方向与官方一致，有更强模型 key 时 `--judge-model` 可复评。
 4. **负结果**：single-session-assistant 9.1%（助手侧证据提取召回残差）；temporal 记忆 < chunks（提取压缩丢时间先后，图时间边是 Phase 8 方向）；preference 类 oracle 仅 50%（模型天花板）。
 5. baseline 4% ≈ abstention 得分——题目有效性的证据，不是失败。
