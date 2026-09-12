@@ -1,8 +1,8 @@
-# 🐜 OpenAnt-MemoryArk · 记忆方舟
+﻿# 🐜 OpenAnt-MemoryArk · 记忆方舟
 
 > **当人的大脑开始遗忘这个世界的时候，世界不要因此把这个人也遗忘掉。**
 
-**OpenAnt-MemoryArk 是一个 24/7 常驻的个人 AI 助手运行时**：事件驱动多智能体内核、图增强长期记忆、深度安全治理，全部组件在真实基础设施（MySQL / RabbitMQ / Redis / Qdrant / Neo4j）上集成验证，**431 个自动化测试 + CI 门禁**。
+**OpenAnt-MemoryArk 是一个 24/7 常驻的个人 AI 助手运行时**：事件驱动多智能体内核、图增强长期记忆、深度安全治理，全部组件在真实基础设施（MySQL / RabbitMQ / Redis / Qdrant / Neo4j）上集成验证，**437 个自动化测试 + CI 门禁**。
 
 它的第一个应用场景是**记忆方舟（Memory Ark）**——面向阿尔茨海默病家庭照护的认知辅助原型：替老人保管正在消失的外部世界（人物关系、人生事件、生活习惯），在困惑时温柔重锚定现实，在记忆异常时向家人发出信号。
 
@@ -123,7 +123,7 @@ open-ant migrate-chroma --workspace ./workspace    # Chroma → Qdrant 迁移
 - **Neo4j 记忆图**：实体/关系建模、**冲突检测与 LLM 仲裁**（SUPERSEDES 边）、低重要度记忆软归档 TTL
 - **检索管线**：query 改写 → hybrid → 子图扩展 → cross-encoder 重排 → `<retrieved>` 定界符防注入
 - **提取层**：工具调用约束 JSON（单条坏数据不连坐整批）
-- **自带评测**：`python -m evals.run_retrieval_eval` —— 20 篇中文语料 × 30 条标注查询，dense **0.983** / hybrid(RRF) **0.983**（bge-small-zh 下追平）/ +rerank **0.967**（recall@5，报告可复现）；长期记忆问答在 LongMemEval（ICLR 2025）上评测（见 `eval.md`）；中文稀疏模型对照实验见 `evals/report_sparse_zh.md`
+- **自带评测**：长期记忆问答在 LongMemEval（ICLR 2025，官方 judge 协议，协议 v2 非思考）上评测——五档消融：无记忆 **4.0%** → 生产口径记忆 **50.0%** → 原始文本检索 **67.0%** → oracle **72.6%**（报告 `evals/report_longmemeval.md`，每个百分比带 yes/总数）；护栏评测（20 恶意 + 20 良性，检出 85% / 误杀 0%）作 CI 门禁
 
 ### 安全
 - 三层沙箱：路径（阻断配置/密钥）· Docker 命令（`--user` 非 root、内存/CPU 硬限、只读根文件系统）· 网络（SSRF 防御、域名黑白名单+私有 IP 阻断）
@@ -133,7 +133,7 @@ open-ant migrate-chroma --workspace ./workspace    # Chroma → Qdrant 迁移
 - 凭据纪律：密钥仅存 `.env`，日志/测试/文档零泄露（发布有 check_publish 泄露扫描门禁）
 
 ### 工程
-- **431 个自动化测试**（pytest）+ ruff + GitHub Actions CI；含真实 MySQL / RabbitMQ / Qdrant 云 / Neo4j Aura 集成测试（无凭据环境自动 skip）
+- **437 个自动化测试**（pytest）+ ruff + GitHub Actions CI；含真实 MySQL / RabbitMQ / Qdrant 云 / Neo4j Aura 集成测试（无凭据环境自动 skip）
 - **发布门禁**（`check_publish.py`）：密钥形态扫描 + 文件名黑名单，0.1.0 密钥泄露事故后强制流程，发布前非零禁止上传
 - 演进可回溯：26.1 玩具 → 27.0 止血+测试 → 28.0 存储/消息 → 29.0 LLM/工具 → 30.0 记忆 → 31.0 安全/可观测 → 32.0 收尾 → 35.x 评测/追踪（`git log` 每步可复现）
 
@@ -150,8 +150,8 @@ src/                      # git 仓库根
 │   ├── provider/         # LLM Router/Qdrant/embedding(Redis 缓存)/检索
 │   ├── tools/            # 内置工具/策略治理/审计
 │   ├── channel/ cli/ utils/
-│   └── tests/            # 431 测试
-├── evals/                # 检索/护栏/LongMemEval 评测（语料/指标/对照 runner/报告）
+│   └── tests/            # 437 测试
+├── evals/                # 护栏评测（CI 门禁）+ LongMemEval 基准（协议 v2）
 └── pyproject.toml        # 打包/测试/lint 配置（sdist allowlist 防密钥泄露）
 ```
 
@@ -159,12 +159,10 @@ src/                      # git 仓库根
 
 ```bash
 cd src
-python -m pytest -q                        # 431 passed
+python -m pytest -q                        # 437 passed
 ruff check ant                             # 0 错误
-python -m evals.run_retrieval_eval         # 检索三方法对照 → evals/report_retrieval.md
 python -m evals.run_guardrail_eval --ci    # 注入护栏检出率/误杀率（CI 同款门禁）
-python -m evals.agent_task_runner          # 10 个记忆任务离线骨架评分
-python -m evals.sparse_zh_experiment       # 中文稀疏模型真云对照实验
+python -m evals.run_longmemeval_eval --mode chunks --n 100   # LongMemEval 五档消融（协议 v2）
 python check_publish.py                    # 发布前密钥扫描门禁（非零禁止上传）
 ```
 

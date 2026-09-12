@@ -45,7 +45,7 @@ Aura 云在控制台快照；本地容器备份 `neo4j-data` 卷。
 | 启动即报错 | `open-ant doctor --workspace ./workspace`（十一项自检，坏配置点名） | doctor 报 ERROR 的项直接修 .env/config |
 | 消息不回复 | `curl http://127.0.0.1:8000/readyz`（哪个组件 down 一目了然） | RabbitMQ 队列积压：管理台 15672 看 `ant.*` 队列与 `ant.dlq` 深度 |
 | 消息进死信 | 管理台 ant.dlq 查看 | 消费端日志 grep "Event exceeded max retries" |
-| 检索结果差 | `python -m evals.run_retrieval_eval` 复跑对照 | 看 evals/report_retrieval.md；中文语料可切 `memory.sparse_model: jieba`（重建集合后） |
+| 检索结果差 | 查检索链路日志（rewrite/hybrid/rerank 各段耗时） | 切 `memory.sparse_model` 后必须重建集合（两种索引空间不可混用，见 `qdrant_store.py` docstring）；公开基准对照：`python -m evals.run_longmemeval_eval --mode chunks --n 100` |
 | 成本异常 | 查 usage_records 表 | `SELECT model, SUM(prompt_tokens), SUM(completion_tokens), SUM(cost) FROM usage_records GROUP BY model;`（表结构以 alembic 迁移为准） |
 | crash-loop | 日志 grep "crash #" | 指数退避 5s→120s，稳定 300s 自动重置；连续 crash #5 以上要查根因 |
 | 凭据问题 | doctor 的 mysql/rabbitmq/qdrant/neo4j 行 | 密码打码输出，值只改 .env |

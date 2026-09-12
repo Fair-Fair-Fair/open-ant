@@ -39,6 +39,6 @@ jobs:
       - name: Install package with dev deps
         run: pip install -e ".[dev]"
       - name: Guardrail dataset + runner tests
-        run: pytest -q ant/tests/test_guardrail_eval.py ant/tests/test_eval_metrics.py
+        run: pytest -q ant/tests/test_guardrail_eval.py
       - name: Guardrail eval runner (CI mode, threshold asserts)
         run: python -m evals.run_guardrail_eval --ci

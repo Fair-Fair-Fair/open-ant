@@ -323,9 +323,9 @@ Trace 5f8b2c1d…9e6f   总耗时 9.8s   ← 一条用户消息 = 一条 Trace
 
 ### 1. 记忆更新过程中，如何保证语义匹配准确性？匹配错误如何处理？
 
-- **准确性三层**：① 写入侧：提取用工具调用约束 JSON（schema 强约束字段与类型，temperature 0.2），单条坏数据丢弃不连坐；② 检索侧：dense+sparse 双向量 + RRF 融合 + cross-encoder 重排 + Neo4j 子图扩展；③ 验证侧：30 条标注查询 eval，recall@5 = 0.983（数字可复现）。
+- **准确性三层**：① 写入侧：提取用工具调用约束 JSON（schema 强约束字段与类型，temperature 0.2），单条坏数据丢弃不连坐；② 检索侧：dense+sparse 双向量 + RRF 融合 + cross-encoder 重排 + Neo4j 子图扩展；③ 验证侧：LongMemEval（ICLR 2025）五档消融——生产口径记忆 50.0%（协议 v2，每个百分比带 yes/总数）。
 - **匹配错误处理**：冲突检测（同实体+同类别+更旧事实 top3）→ LLM 仲裁 keep_new/keep_old/merge → SUPERSEDES 边记录取代关系；低重要度旧记忆软归档；检索失败一律降级返回（不炸链路）。
-- 可追问落点：`memory/graph.py` detect_conflicts 的 Cypher 条件；`evals/report_retrieval.md`。
+- 可追问落点：`memory/graph.py` detect_conflicts 的 Cypher 条件；`evals/report_longmemeval.md`。
 
 ### 2. 为什么采用 Agent 架构？相比 Workflow 编排的优势？
 
@@ -391,7 +391,7 @@ Trace 5f8b2c1d…9e6f   总耗时 9.8s   ← 一条用户消息 = 一条 Trace
 ### 12. 做过哪些优化提升召回率与准确率？
 
 - 双向量 hybrid + RRF；cross-encoder 重排；Neo4j 子图扩展；query 改写；diversity_by_source（防长文档挤占窗口）。
-- **数据驱动**：eval 对照发现英文稀疏模型拖累中文（0.917<0.983），换 bge-small-zh 后 hybrid 追平 0.983；jieba 中文稀疏实验（0.967）未跑赢——保留 fastembed 默认。所有结论有报告。
+- **数据驱动**：稀疏模型选型实测——BM25 ~37k 条/s vs jieba ~1k 条/s（GIL 串行），评测基建沿用 fastembed BM25；LongMemEval 消融定位检索与提取各自的损耗（报告 `evals/report_longmemeval.md`）。
 
 ### 13. 交给成熟产品（开源/阿里/字节）会不会更好？为什么自研？
 
@@ -466,7 +466,7 @@ Trace 5f8b2c1d…9e6f   总耗时 9.8s   ← 一条用户消息 = 一条 Trace
 
 - **30 秒版（背）**："我的项目是一个 24/7 常驻的个人 AI 助手运行时。2026 年 always-on agent 成为行业公认品类（OpenClaw 引爆，Gemini Spark、微软 Scout 跟进），但这类系统要把电脑和账号权限交给模型——安全厂商公开警告（CVE-2026-25253 网关劫持 8.8 分、恶意 skill 市场、prompt injection 删邮件事故）。我的项目回答这个品类的**信任问题**：消息不丢（RabbitMQ DLX 五级重试 + outbox + 幂等）、权限可控（三层沙箱/HITL/审计）、记忆可仲裁（Neo4j 冲突检测 + LongMemEval 评测）、全链路可观测（OTel/Prometheus），462 个自动化测试 + CI，已发布 PyPI。"
 - **场景升华**：第一个应用场景是记忆方舟（AD 认知辅助概念验证，见 Project §11）——不是"造轮子"，是技术恰好能承载一个真正重要的场景。
-- **数字化证据链**：LongMemEval（ICLR 2025，官方 judge 协议逐字移植）五档消融——无记忆 4.0% → 生产口径记忆 50.0% → 原始文本 67.0% → oracle 72.6%（协议 v2 全链非思考对齐官方 gpt-4o 协议形态；子集 n=100 与全量 500 同生成同 judge，chunks 全量 64.0%；每档 Δ 都有归因，每个百分比带 yes/总数，报告 `evals/report_longmemeval.md`）；检索 recall@5=0.983；护栏 85%/FP 0%。
+- **数字化证据链**：LongMemEval（ICLR 2025，官方 judge 协议逐字移植）五档消融——无记忆 4.0% → 生产口径记忆 50.0% → 原始文本 67.0% → oracle 72.6%（协议 v2 全链非思考对齐官方 gpt-4o 协议形态；子集 n=100 与全量 500 同生成同 judge，chunks 全量 64.0%；每档 Δ 都有归因，每个百分比带 yes/总数，报告 `evals/report_longmemeval.md`）；护栏 85%/FP 0%（CI 门禁）。
 - 可追问落点：`eval.md`（三层评估体系）、`memory-ark.md`（场景映射表）、README 的"为什么是 OpenAnt"章节。
 
 ### 25. 语音交互怎么做？（终端语音模式）

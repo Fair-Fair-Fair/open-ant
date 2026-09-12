@@ -1,22 +1,20 @@
-"""Open-Ant evaluation suite (Phase 3D).
+"""Open-Ant evaluation suite.
 
 Components
 ----------
-- ``metrics``            — retrieval metrics (recall@k / MRR / NDCG@k), pure & testable
-- ``dataset_retrieval``  — hand-written Chinese retrieval corpus (20 docs) +
-                          30 annotated queries with ground truth
-- ``dataset_memory_tasks`` — 10 multi-turn memory tasks (remember → distract → probe)
-- ``run_retrieval_eval`` — CLI that runs the retrieval eval against Qdrant and
-                          writes ``report_retrieval.md``
+- ``run_guardrail_eval`` + ``dataset_guardrail`` — injection-guardrail eval
+  (20 malicious + 20 benign samples, CI threshold gate)
+- ``run_longmemeval_eval`` + ``longmemeval_judge`` — LongMemEval public
+  benchmark (ICLR 2025), five-mode ablation under protocol v2 (non-thinking)
 
-This package deliberately keeps its data modules dependency-free so tests
-(``ant/tests/test_eval_metrics.py``) can import them without pulling in
-Qdrant / sentence-transformers / litellm.
+Self-built small-sample evals (retrieval corpus / memory tasks / sparse
+experiment) were removed on 2026-09-12; historical conclusions are archived
+in ``workspace/code.md``.
 """
 
 __all__ = [
-    "metrics",
-    "dataset_retrieval",
-    "dataset_memory_tasks",
-    "run_retrieval_eval",
+    "dataset_guardrail",
+    "run_guardrail_eval",
+    "run_longmemeval_eval",
+    "longmemeval_judge",
 ]

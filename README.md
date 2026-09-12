@@ -1,8 +1,8 @@
-# 🐜 OpenAnt-MemoryArk
+﻿# 🐜 OpenAnt-MemoryArk
 
 > **When a mind begins to forget the world, the world should not forget the person.**
 
-**OpenAnt-MemoryArk is an always-on personal AI agent runtime**: an event-driven multi-agent kernel, graph-augmented long-term memory, and defense-in-depth security — every component integration-tested against real infrastructure (MySQL / RabbitMQ / Redis / Qdrant / Neo4j), with **431 automated tests + CI gates**.
+**OpenAnt-MemoryArk is an always-on personal AI agent runtime**: an event-driven multi-agent kernel, graph-augmented long-term memory, and defense-in-depth security — every component integration-tested against real infrastructure (MySQL / RabbitMQ / Redis / Qdrant / Neo4j), with **437 automated tests + CI gates**.
 
 Its first application scenario is the **Memory Ark** — a cognitive-assistance prototype for Alzheimer's family caregiving: preserving the fading external world of the elderly (relationships, life events, daily habits), gently re-grounding them in reality when they are confused, and signaling family members when memory anomalies appear.
 
@@ -131,7 +131,7 @@ open-ant migrate-chroma --workspace ./workspace    # Chroma → Qdrant migration
 - **Neo4j memory graph**: entity/relationship modeling, **conflict detection with LLM arbitration** (SUPERSEDES edges), soft-archiving of low-importance memories with TTL
 - **Retrieval pipeline**: query rewrite → hybrid → subgraph expansion → cross-encoder rerank → `<retrieved>` delimiter injection defense
 - **Extraction layer**: tool-call-constrained JSON (one bad record does not poison the whole batch)
-- **Bundled evals**: `python -m evals.run_retrieval_eval` — 20 Chinese corpora × 30 annotated queries, dense **0.983** / hybrid(RRF) **0.983** (matching dense under bge-small-zh) / +rerank **0.967** (recall@5, reproducible report); long-term memory QA benchmarked on LongMemEval (ICLR 2025, see `eval.md`); Chinese sparse-model comparison in `evals/report_sparse_zh.md`
+- **Bundled evals**: long-term memory QA benchmarked on LongMemEval (ICLR 2025, official judge protocol, protocol v2 non-thinking): five-mode ablation — no-memory **4.0%** → production memory **50.0%** → raw-text retrieval **67.0%** → oracle **72.6%** (full report `evals/report_longmemeval.md`, every percentage carries its yes/total fraction); guardrail eval (20 malicious + 20 benign, detection 85% / FP 0%) wired as a CI gate
 
 ### Security
 - Three-layer sandbox: paths (blocks config/secrets) · Docker commands (`--user` non-root, hard memory/CPU limits, read-only root filesystem) · network (SSRF defense, domain allow/deny lists + private-IP blocking)
@@ -141,7 +141,7 @@ open-ant migrate-chroma --workspace ./workspace    # Chroma → Qdrant migration
 - Credential discipline: secrets live only in `.env`; zero leakage in logs/tests/docs (enforced by the check_publish leak-scan gate)
 
 ### Engineering
-- **431 automated tests** (pytest) + ruff + GitHub Actions CI, including real MySQL / RabbitMQ / cloud Qdrant / Neo4j Aura integration tests (auto-skipped without credentials)
+- **437 automated tests** (pytest) + ruff + GitHub Actions CI, including real MySQL / RabbitMQ / cloud Qdrant / Neo4j Aura integration tests (auto-skipped without credentials)
 - **Publish gate** (`check_publish.py`): secret-pattern scanning + filename blocklist — a mandatory process after the 0.1.0 key-leak incident; a non-zero exit forbids upload
 - Traceable evolution: 26.1 toy → 27.0 hardening+tests → 28.0 storage/messaging → 29.0 LLM/tools → 30.0 memory → 31.0 security/observability → 32.0 wrap-up → 35.x evals/tracing (every step reproducible via `git log`)
 
@@ -158,8 +158,8 @@ src/                      # git repo root
 │   ├── provider/         # LLM Router/Qdrant/embedding(Redis cache)/retrieval
 │   ├── tools/            # built-in tools/policy governance/audit
 │   ├── channel/ cli/ utils/
-│   └── tests/            # 431 tests
-├── evals/                # retrieval/guardrail/LongMemEval evals (corpora/metrics/runners/reports)
+│   └── tests/            # 437 tests
+├── evals/                # guardrail eval (CI gate) + LongMemEval benchmark (protocol v2)
 └── pyproject.toml        # packaging/test/lint config (sdist allowlist prevents key leaks)
 ```
 
@@ -167,12 +167,10 @@ src/                      # git repo root
 
 ```bash
 cd src
-python -m pytest -q                        # 431 passed
+python -m pytest -q                        # 437 passed
 ruff check ant                             # 0 errors
-python -m evals.run_retrieval_eval         # three retrieval variants compared → evals/report_retrieval.md
 python -m evals.run_guardrail_eval --ci    # injection guardrail detection/false-positive (same gate as CI)
-python -m evals.agent_task_runner          # 10 memory-task offline skeleton scoring
-python -m evals.sparse_zh_experiment       # real-cloud Chinese sparse model comparison
+python -m evals.run_longmemeval_eval --mode chunks --n 100   # LongMemEval five-mode ablation (protocol v2)
 python check_publish.py                    # pre-publish secret-scan gate (non-zero forbids upload)
 ```
 

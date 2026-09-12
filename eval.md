@@ -19,9 +19,9 @@
 
 | 层 | 作用 | 本项目现状 |
 |---|---|---|
-| **公开 benchmark**（对外对标） | 数字与论文/排行榜可比，证明"不是自说自话" | LongMemEval 进行中（本文档） |
-| **消融实验**（证明机制） | 模型分数低没关系，机制增量（memory on/off、仲裁 on/off）才是工程能力的证据 | 四模式消融（baseline/oracle/memory/chunks）+ 后续 graph on/off |
-| **自建回归**（防倒退） | 每次改动自动门禁，不追求对外意义 | 检索 recall@5=0.983 / guardrail 85%/FP 0% / offline tasks（CI 已接） |
+| **公开 benchmark**（对外对标） | 数字与论文/排行榜可比，证明"不是自说自话" | LongMemEval 协议 v2 已出数（本文档 §3） |
+| **消融实验**（证明机制） | 模型分数低没关系，机制增量（memory on/off、仲裁 on/off）才是工程能力的证据 | 五档消融（baseline/oracle/memory/chunks + 提取口径对照）+ 后续 graph on/off |
+| **自建回归**（防倒退） | 每次改动自动门禁，不追求对外意义 | guardrail 85%/FP 0%（CI 已接） |
 
 一句话答案：**"我用公开 benchmark 证明系统有效（可对标）、用消融证明每个组件有贡献（可归因）、用自建 eval 做回归门禁（可迭代）。"**
 
